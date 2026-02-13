@@ -6,6 +6,7 @@
   "platformAutomerge": true,
   "automerge": true,
   "forkProcessing": "enabled",
+  "includeForks": true,
   "dependencyDashboard": true,
   "dependencyDashboardApproval": true,
   "assignees": ["c0rrre"],
