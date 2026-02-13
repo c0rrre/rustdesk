@@ -1,0 +1,94 @@
+name: Auto-Build & Release (Merge)
+
+on:
+  push:
+    branches: [ "main", "master" ]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build-and-release:
+    name: Build Windows Client
+    runs-on: windows-2022
+    
+    steps:
+      - name: Checkout Source Code
+        uses: actions/checkout@v3
+
+      - name: Generate Version Tag
+        id: versioning
+        shell: powershell
+        run: |
+          $date = Get-Date -Format "yyyy.MM.dd-HHmm"
+          $tag = "v$date"
+          echo "VERSION_TAG=$tag" >> $env:GITHUB_ENV
+          Write-Host "Version: $tag"
+
+      - name: Setup Rust Toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Setup Flutter
+        uses: subosito/flutter-action@v2
+        with:
+          channel: 'stable'
+
+      - name: Install vcpkg Dependencies
+        run: |
+          git clone https://github.com/microsoft/vcpkg
+          .\vcpkg\bootstrap-vcpkg.bat
+          .\vcpkg\vcpkg install libvpx:x64-windows libyuv:x64-windows opus:x64-windows
+
+      - name: Inject Configuration & Branding
+        shell: powershell
+        env:
+          MY_HOST: ${{ secrets.RS_HOST }}
+          MY_KEY: ${{ secrets.RS_KEY }}
+          MY_APP_NAME: ${{ secrets.APP_NAME }}
+        run: |
+          # 1. Config (Server & Key)
+          $configFile = "libs/hbb_common/src/config.rs"
+          if (Test-Path $configFile) {
+              $content = Get-Content $configFile -Raw
+              $content = $content -replace 'pub const RENDEZVOUS_SERVER: &''static str = ".*?"', "pub const RENDEZVOUS_SERVER: &'static str = ""$env:MY_HOST"""
+              $content = $content -replace 'pub const RS_PUB_KEY: &''static str = ".*?"', "pub const RS_PUB_KEY: &'static str = ""$env:MY_KEY"""
+              Set-Content -Path $configFile -Value $content
+          }
+          # 2. Name (Main C++)
+          $cppFile = "flutter/windows/runner/main.cpp"
+          if (Test-Path $cppFile) {
+             $cppContent = Get-Content $cppFile -Raw
+             $cppContent = $cppContent -replace 'L"RustDesk"', "L""$env:MY_APP_NAME"""
+             Set-Content -Path $cppFile -Value $cppContent
+          }
+          # 3. Name (Pubspec)
+          $pubspec = "libs/flutter_common/pubspec.yaml"
+          if (Test-Path $pubspec) {
+              (Get-Content $pubspec) -replace 'description: RustDesk', "description: $env:MY_APP_NAME" | Set-Content $pubspec
+          }
+
+      - name: Build Application
+        run: |
+          cd flutter
+          flutter pub get
+          flutter build windows --release
+
+      - name: Prepare Artifact
+        shell: powershell
+        run: |
+          $buildDir = "flutter\build\windows\runner\Release"
+          $exePath = Get-ChildItem -Path $buildDir -Filter "*.exe" | Select-Object -First 1
+          if ($exePath) {
+            $newName = "$buildDir\TechnikHilfe_Loske_${{ env.VERSION_TAG }}.exe"
+            Rename-Item -Path $exePath.FullName -NewName $newName
+            echo "RELEASE_FILE=$newName" >> $env:GITHUB_ENV
+          }
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v1
+        with:
+          tag_name: ${{ env.VERSION_TAG }}
+          name: Release ${{ env.VERSION_TAG }}
+          body: Automatisches Update.
+          files: ${{ env.RELEASE_FILE }}

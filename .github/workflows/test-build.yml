@@ -1,0 +1,59 @@
+name: PR Test Build
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+    branches: [ "main", "master" ]
+
+permissions:
+  contents: read
+
+jobs:
+  test-build:
+    name: Windows PR Build Test
+    runs-on: windows-2022
+
+    steps:
+      # 1. Checkout des PR-Codes
+      - name: Checkout PR Source
+        uses: actions/checkout@v3
+
+      # 2. Test-Version generieren
+      - name: Generate Test Version
+        shell: powershell
+        run: |
+          $date = Get-Date -Format "yyyy.MM.dd-HHmm"
+          $tag = "pr-test-$date"
+          
+          Write-Host "PR Test Version: $tag"
+          echo "VERSION_TAG=$tag" >> $env:GITHUB_ENV
+
+      # 3. Rust Setup
+      - name: Setup Rust Toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      # 4. Flutter Setup
+      - name: Setup Flutter
+        uses: subosito/flutter-action@v2
+        with:
+          channel: 'stable'
+
+      # 5. Dummy Build simulieren
+      - name: Simulate Build Output
+        shell: powershell
+        run: |
+          $outputDir = "pr-test-output"
+          New-Item -ItemType Directory -Path $outputDir -Force
+          
+          $filePath = "$outputDir\PR_Test_${{ env.VERSION_TAG }}.exe"
+          New-Item -ItemType File -Path $filePath
+          
+          echo "RELEASE_FILE=$filePath" >> $env:GITHUB_ENV
+          Write-Host "Dummy EXE erstellt: $filePath"
+
+      # 6. Artifact hochladen (nur für Review)
+      - name: Upload PR Test Artifact
+        uses: actions/upload-artifact@v3
+        with:
+          name: PR-Test-${{ env.VERSION_TAG }}
+          path: ${{ env.RELEASE_FILE }}
