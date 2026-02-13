@@ -46,7 +46,7 @@ jobs:
         run: |
           git clone https://github.com/microsoft/vcpkg
           .\vcpkg\bootstrap-vcpkg.bat
-          .\vcpkg\vcpkg install --classic libvpx:x64-windows libyuv:x64-windows opus:x64-windows
+          .\vcpkg\vcpkg install --classic libvpx:x64-windows-static libyuv:x64-windows-static opus:x64-windows-static
 
       - name: Inject Configuration & Branding (Auto-Detect)
         shell: powershell
@@ -105,11 +105,12 @@ jobs:
         env:
           # WICHTIG: Damit Rust die installierten Libs findet (Fix für Error 101)
           VCPKG_ROOT: ${{ github.workspace }}\vcpkg
+          VCPKG_DEFAULT_TRIPLET: x64-windows-static
         run: |
-          :: 1. Bridge-Code generieren (Das Python Skript liegt im Root)
+          :: 1. Bridge-Code generieren
           python build.py
 
-          :: 2. In den Flutter-Ordner wechseln (Fix für "No pubspec.yaml found")
+          :: 2. In den Flutter-Ordner wechseln
           cd flutter
           
           :: 3. Abhängigkeiten laden und bauen
