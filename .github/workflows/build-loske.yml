@@ -21,6 +21,8 @@ jobs:
     steps:
       - name: Checkout Source Code
         uses: actions/checkout@v6
+        with:
+          submodules: recursive
 
       - name: Generate Version Tag
         id: versioning
@@ -45,34 +47,55 @@ jobs:
           .\vcpkg\bootstrap-vcpkg.bat
           .\vcpkg\vcpkg install --classic libvpx:x64-windows libyuv:x64-windows opus:x64-windows
 
-      - name: Inject Configuration & Branding
+      - name: Inject Configuration & Branding (Auto-Detect)
         shell: powershell
         env:
           MY_HOST: ${{ secrets.RS_HOST }}
           MY_KEY: ${{ secrets.RS_KEY }}
           MY_APP_NAME: ${{ secrets.APP_NAME }}
         run: |
-          # 1. Config (Server & Key)
-          $configFile = "libs/hbb_common/src/config.rs"
-          if (Test-Path $configFile) {
+          Write-Host "Starte Konfiguration für: $env:MY_APP_NAME"
+
+          # --- A. Config Datei (Server & Key) ---
+          $foundFiles = Get-ChildItem -Path . -Recurse -Include "*.rs" | Select-String -Pattern "pub const RENDEZVOUS_SERVER" -List
+          
+          if ($foundFiles) {
+              $configFile = $foundFiles[0].Path
+              Write-Host "TREFFER: Config Datei gefunden: $configFile"
+              
               $content = Get-Content $configFile -Raw
+              # Server ersetzen
               $content = $content -replace 'pub const RENDEZVOUS_SERVER: &''static str = ".*?"', "pub const RENDEZVOUS_SERVER: &'static str = ""$env:MY_HOST"""
+              # Key ersetzen
               $content = $content -replace 'pub const RS_PUB_KEY: &''static str = ".*?"', "pub const RS_PUB_KEY: &'static str = ""$env:MY_KEY"""
+              
               Set-Content -Path $configFile -Value $content
+              Write-Host " -> Server & Key wurden eingetragen."
+          } else {
+              Write-Warning "WARNUNG: Config Datei nicht gefunden! Server-Daten fehlen im Build."
           }
-          # 2. Name (Main C++)
-          $cppFile = "flutter/windows/runner/main.cpp"
-          if (Test-Path $cppFile) {
+
+          # --- B. App Name (C++ Fenstertitel) ---
+          $cppFiles = Get-ChildItem -Path . -Recurse -Include "main.cpp" | Select-String -Pattern 'window.Create\(L"RustDesk"' -List
+          
+          if ($cppFiles) {
+             $cppFile = $cppFiles[0].Path
+             Write-Host "TREFFER: Main C++ Datei gefunden: $cppFile"
+             
              $cppContent = Get-Content $cppFile -Raw
              $cppContent = $cppContent -replace 'L"RustDesk"', "L""$env:MY_APP_NAME"""
              Set-Content -Path $cppFile -Value $cppContent
-          }
-          # 3. Name (Pubspec)
-          $pubspec = "libs/flutter_common/pubspec.yaml"
-          if (Test-Path $pubspec) {
-              (Get-Content $pubspec) -replace 'description: RustDesk', "description: $env:MY_APP_NAME" | Set-Content $pubspec
+             Write-Host " -> Fenstertitel angepasst."
           }
 
+          # --- C. App Name (Pubspec Beschreibung) ---
+          $pubspecFiles = Get-ChildItem -Path . -Recurse -Include "pubspec.yaml" | Select-String -Pattern "name: rustdesk" -List
+          if ($pubspecFiles) {
+              $pubspec = $pubspecFiles[0].Path
+              (Get-Content $pubspec) -replace 'description: RustDesk', "description: $env:MY_APP_NAME" | Set-Content $pubspec
+              Write-Host " -> Pubspec Beschreibung angepasst."
+          }
+          
       - name: Build Application
         run: |
           cd flutter
