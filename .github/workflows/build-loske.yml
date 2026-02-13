@@ -106,65 +106,58 @@ jobs:
           flutter pub get
           flutter build windows --release
 
-       # 7. Portable EXE verpacken (Optimiert & Pfad-Fix)
+      # 7. Portable EXE verpacken (Robust & Intelligent)
       - name: Package Portable (Single File)
         shell: powershell
         run: |
           pip install brotli
 
-          Write-Host "Suche nach der Flutter-Release-EXE..."
+          Write-Host "Suche nach der Release-EXE im gesamten 'flutter' Ordner..."
           
-          # WICHTIG: Wir suchen NUR im Flutter-Build-Ordner, um die falsche 'target/release' EXE zu vermeiden!
-          $searchPath = "flutter/build/windows"
-          
-          if (Test-Path $searchPath) {
-              $exeFile = Get-ChildItem -Path $searchPath -Recurse -Filter "*.exe" | Where-Object { $_.FullName -like "*Release*" } | Select-Object -First 1
-          } else {
-              Write-Error "FEHLER: Der Ordner '$searchPath' existiert nicht. Build fehlgeschlagen?"
-              exit 1
-          }
+          # Wir suchen ab dem Ordner "flutter" rekursiv nach einer .exe, die "Release" im Pfad hat.
+          # Damit ist es egal, ob sie in build/windows oder build/windows/x64 liegt.
+          $exeFile = Get-ChildItem -Path "flutter" -Recurse -Filter "*.exe" -ErrorAction SilentlyContinue | Where-Object { $_.FullName -like "*Release*" } | Select-Object -First 1
 
           if ($exeFile) {
             $sourceDir = $exeFile.DirectoryName
             $exeName = $exeFile.Name
             
-            Write-Host "KORREKTE QUELLE GEFUNDEN: $sourceDir"
+            Write-Host "GEFUNDEN: $sourceDir\$exeName"
 
-            # --- SCHRITT A: Sauberen Staging-Ordner erstellen ---
+            # --- Staging (Sauberen Ordner bauen) ---
             $stagingDir = "Temp_Portable_Staging"
-            # Falls der Ordner vom vorherigen Lauf existiert, löschen
             if (Test-Path $stagingDir) { Remove-Item -Path $stagingDir -Recurse -Force }
             New-Item -ItemType Directory -Path $stagingDir -Force | Out-Null
             
-            Write-Host "Kopiere Dateien nach $stagingDir ..."
-            
-            # 1. Die .exe kopieren
+            # Dateien kopieren
             Copy-Item -Path "$sourceDir\$exeName" -Destination "$stagingDir\"
-            
-            # 2. Alle .dll Dateien kopieren
             Copy-Item -Path "$sourceDir\*.dll" -Destination "$stagingDir\"
             
-            # 3. Den 'data' Ordner kopieren (Assets, Fonts) - Das ist der Ordner, der vorher fehlte!
+            # Data Ordner finden (liegt meist neben der EXE)
             if (Test-Path "$sourceDir\data") {
                 Copy-Item -Path "$sourceDir\data" -Destination "$stagingDir\" -Recurse
             } else {
-                Write-Error "KRITISCHER FEHLER: 'data' Ordner fehlt in $sourceDir! Flutter Build war nicht erfolgreich."
-                exit 1
+                # Fallback: Manchmal liegt data einen Ordner höher
+                $dataFallback = Get-ChildItem -Path "flutter" -Recurse -Filter "data" -Directory | Where-Object { $_.FullName -like "*build*windows*" } | Select-Object -First 1
+                if ($dataFallback) {
+                    Copy-Item -Path $dataFallback.FullName -Destination "$stagingDir\" -Recurse
+                } else {
+                    Write-Error "FEHLER: 'data' Ordner nicht gefunden. Build unvollständig."
+                    exit 1
+                }
             }
 
-            # --- SCHRITT B: Packen ---
-            Write-Host "Starte Verpackung (Single File)..."
-            
-            # Wir packen den sauberen Staging-Ordner
+            # --- Packen ---
+            # Output (-o) ist . (Hauptverzeichnis), Input (-f) ist der Staging Ordner
             python libs/portable/generate.py -f "$stagingDir" -o . -e "$stagingDir\$exeName"
             
             # Aufräumen
             Remove-Item -Path $stagingDir -Recurse -Force
-            
           } else {
-            Write-Error "FEHLER: Keine .exe im Flutter-Build-Ordner gefunden."
+            Write-Error "FEHLER: Keine .exe Datei im flutter-Ordner gefunden. Der Build (Schritt 6) muss fehlgeschlagen sein!"
             exit 1
           }
+
 
       # 8. Release veröffentlichen (Mit Sicherheits-Check)
       - name: Publish Release
