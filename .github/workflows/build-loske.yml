@@ -39,6 +39,7 @@ jobs:
       - name: Setup Flutter
         uses: subosito/flutter-action@v2
         with:
+          flutter-version: '3.24.5'
           channel: 'stable'
 
       - name: Install vcpkg Dependencies
@@ -96,11 +97,13 @@ jobs:
               Write-Host " -> Pubspec Beschreibung angepasst."
           }
           
+      - name: Install LLVM
+        run: choco install llvm -y
+
       - name: Build Application
         run: |
-          cd flutter
-          flutter pub get
-          flutter build windows --release
+          # build.py generiert den Bridge-Code und führt dann 'flutter build' aus
+          python build.py --windows
 
       - name: Prepare Artifact
         shell: powershell
