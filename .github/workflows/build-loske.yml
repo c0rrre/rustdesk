@@ -103,12 +103,11 @@ jobs:
       - name: Build Application
         shell: cmd
         env:
-          # WICHTIG: Damit Rust die installierten Libs findet (Fix für Error 101)
           VCPKG_ROOT: ${{ github.workspace }}\vcpkg
           VCPKG_DEFAULT_TRIPLET: x64-windows-static
         run: |
-          :: 1. Bridge-Code generieren
-          python build.py
+          :: 1. Bridge-Code generieren (ohne zu packen)
+          python build.py --skip-portable-pack
 
           :: 2. In den Flutter-Ordner wechseln
           cd flutter
@@ -116,6 +115,51 @@ jobs:
           :: 3. Abhängigkeiten laden und bauen
           flutter pub get
           flutter build windows --release
+
+      - name: Package Portable (Single File)
+        shell: cmd
+        run: |
+          :: --- DIESER SCHRITT MACHT EINE EINZELNE DATEI DARAUS ---
+          
+          :: 1. Benötigte Python-Bibliothek installieren
+          pip install brotli
+
+          :: 2. Das Verpackungs-Skript aufrufen
+          :: -f: Wo liegen die Dateien? (Im Release Ordner)
+          :: -o: Wohin soll die fertige Datei? (Hierher: .)
+          :: -e: Welche Datei soll gestartet werden? (Die EXE im Release Ordner)
+          
+          python libs/portable/generate.py -f flutter\build\windows\runner\Release -o . -e flutter\build\windows\runner\Release\technikhilfe_loske.exe
+
+      - name: Prepare Artifact
+        shell: powershell
+        run: |
+          # Das Skript oben erzeugt eine Datei, die oft "rustdesk-....exe" heißt.
+          # Wir suchen die neueste EXE in diesem Ordner (nicht im flutter Unterordner!)
+          
+          $exePath = Get-ChildItem -Path . -Filter "*.exe" | Sort-Object LastWriteTime -Descending | Select-Object -First 1
+          
+          if ($exePath) {
+            # Wir benennen sie final um
+            $newName = "TechnikHilfe_Loske_Portable_${{ env.VERSION_TAG }}.exe"
+            Rename-Item -Path $exePath.FullName -NewName $newName
+            
+            echo "RELEASE_FILE=$newName" >> $env:GITHUB_ENV
+            Write-Host "Portable Datei bereit: $newName"
+          } else {
+            Write-Error "Portable EXE wurde nicht erstellt!"
+            exit 1
+          }
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ env.VERSION_TAG }}
+          name: Release ${{ env.VERSION_TAG }}
+          body: |
+             TechnikHilfe Loske (Portable Version).
+             Einfach herunterladen und starten. Keine Installation nötig.
+          files: ${{ env.RELEASE_FILE }}
 
       - name: Prepare Artifact
         shell: powershell
