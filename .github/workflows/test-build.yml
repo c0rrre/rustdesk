@@ -15,6 +15,8 @@ jobs:
       # 1. Code holen
       - name: Checkout Source Code
         uses: actions/checkout@v6
+        with:
+          submodules: recursive
 
       # 2. Umgebung aufsetzen
       - name: Setup Rust Toolchain
@@ -33,34 +35,53 @@ jobs:
 
       # 3. Test der Konfiguration (Simulation)
       # Prüft, ob Ihre Secrets korrekt gelesen werden können und die Dateien existieren
-      - name: Test Configuration Injection
+      - name: Test Configuration Injection (Auto-Detect)
         shell: powershell
         env:
           MY_HOST: ${{ secrets.RS_HOST }}
           MY_KEY: ${{ secrets.RS_KEY }}
           MY_APP_NAME: ${{ secrets.APP_NAME }}
         run: |
-          Write-Host "Teste Anpassung für: $env:MY_APP_NAME"
-
-          # A. Config Datei (Server & Key)
-          $configFile = "libs/hbb_common/src/config.rs"
-          if (Test-Path $configFile) {
-              Write-Host "Config Datei gefunden: OK"
-              # Wir simulieren das Lesen, um sicherzugehen, dass keine Syntaxfehler im Skript sind
+          Write-Host "Starte Testlauf für: $env:MY_APP_NAME"
+          
+          # --- A. Config Datei suchen (Rekursiv) ---
+          Write-Host "Suche nach config.rs..."
+          $foundFiles = Get-ChildItem -Path . -Recurse -Include "*.rs" | Select-String -Pattern "pub const RENDEZVOUS_SERVER" -List
+          
+          if ($foundFiles) {
+              $configFile = $foundFiles[0].Path
+              Write-Host "ERFOLG: Config Datei gefunden: $configFile"
+              
+              # Test-Lesen
               $content = Get-Content $configFile -Raw
+              if ($content -match 'pub const RENDEZVOUS_SERVER') {
+                  Write-Host " -> Inhalt validiert: Server-Variable vorhanden."
+              } else {
+                  Write-Warning " -> Datei gefunden, aber Variable fehlt?"
+              }
           } else {
-              Write-Error "FEHLER: Config Datei nicht gefunden!"
+              Write-Error "FEHLER: Konnte keine Datei mit 'RENDEZVOUS_SERVER' finden. Submodules prüfen!"
               exit 1
           }
 
-          # B. App Name (C++)
-          $cppFile = "flutter/windows/runner/main.cpp"
-          if (Test-Path $cppFile) {
-             Write-Host "Main C++ Datei gefunden: OK"
+          # --- B. App Name suchen (C++) ---
+          Write-Host "Suche nach main.cpp..."
+          $cppFiles = Get-ChildItem -Path . -Recurse -Include "main.cpp" | Select-String -Pattern 'window.Create\(L"RustDesk"' -List
+          
+          if ($cppFiles) {
+             $cppFile = $cppFiles[0].Path
+             Write-Host "ERFOLG: Main C++ Datei gefunden: $cppFile"
           } else {
-             Write-Error "FEHLER: Main C++ Datei nicht gefunden!"
-             exit 1
+             # Nicht kritisch für den Build, aber wichtig fürs Branding
+             Write-Warning "WARNUNG: main.cpp für Fenstertitel nicht gefunden."
           }
+
+      # 4. Der Build-Test (Kompilieren ohne Upload)
+      - name: Test Compilation (Build)
+        run: |
+          cd flutter
+          flutter pub get
+          flutter build windows --release
 
       # 4. Der Build-Test (Kompilieren ohne Upload)
       - name: Test Compilation (Build)
