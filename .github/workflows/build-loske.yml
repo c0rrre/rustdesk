@@ -103,7 +103,8 @@ jobs:
       - name: Build Application
         run: |
           # build.py generiert den Bridge-Code und führt dann 'flutter build' aus
-          python build.py --windows
+          python build.py
+          flutter build windows --release
 
       - name: Prepare Artifact
         shell: powershell
