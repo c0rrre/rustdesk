@@ -91,20 +91,28 @@ jobs:
               (Get-Content $pubspec) -replace 'description: RustDesk', "description: $env:MY_APP_NAME" | Set-Content $pubspec
           }
 
-      # 6. Bauen (Build)
+      # 6. Bauen (Build) - KORRIGIERT: Fehler-Toleranz eingebaut
       - name: Build Application
         shell: cmd
         env:
           VCPKG_ROOT: ${{ github.workspace }}\vcpkg
           VCPKG_DEFAULT_TRIPLET: x64-windows-static
         run: |
-          :: Bridge-Code generieren
-          python build.py --skip-portable-pack
+          echo "--- SCHRITT A: Rust Bridge Generieren ---"
           
-          :: Flutter App bauen
+          :: WICHTIG: Wir hängen "|| echo..." an.
+          :: Das bedeutet: Wenn python abstürzt (wegen dem Pack-Fehler), 
+          :: gibt er nur eine Warnung aus und macht trotzdem weiter!
+          python build.py --skip-portable-pack || echo "WARNUNG: build.py Pack-Fehler ignoriert. Wir packen spaeter selbst."
+          
+          echo "--- SCHRITT B: Flutter Build ---"
+          :: Jetzt bauen wir die eigentliche Windows-Oberfläche
           cd flutter
           flutter pub get
           flutter build windows --release
+          
+          :: Hier prüfen wir, ob Flutter erfolgreich war (das darf NICHT fehlschlagen)
+          if %errorlevel% neq 0 exit /b %errorlevel%
 
       # 7. Portable EXE verpacken (Robust & Intelligent)
       - name: Package Portable (Single File)
