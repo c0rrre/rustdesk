@@ -101,9 +101,19 @@ jobs:
         run: choco install llvm -y
 
       - name: Build Application
+        shell: cmd
+        env:
+          # WICHTIG: Damit Rust die installierten Libs findet (Fix für Error 101)
+          VCPKG_ROOT: ${{ github.workspace }}\vcpkg
         run: |
-          # build.py generiert den Bridge-Code und führt dann 'flutter build' aus
+          :: 1. Bridge-Code generieren (Das Python Skript liegt im Root)
           python build.py
+
+          :: 2. In den Flutter-Ordner wechseln (Fix für "No pubspec.yaml found")
+          cd flutter
+          
+          :: 3. Abhängigkeiten laden und bauen
+          flutter pub get
           flutter build windows --release
 
       - name: Prepare Artifact
