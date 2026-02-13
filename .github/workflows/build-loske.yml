@@ -4,9 +4,9 @@ on:
   push:
     branches: [ "main", "master" ]
     paths-ignore:
-      - '.github/**'       # Ignoriert alles im .github Ordner (Workflows, Renovate, etc.)
-      - 'README.md'        # Ignoriert Änderungen an der Doku
-      - 'LICENSE'          # Ignoriert Lizenz-Änderungen
+      - '.github/**'
+      - 'README.md'
+      - 'LICENSE'
       - 'docs/**'
   workflow_dispatch:
 
@@ -15,15 +15,17 @@ permissions:
 
 jobs:
   build-and-release:
-    name: Build Windows Client
+    name: Build Portable Client
     runs-on: windows-2022
     
     steps:
+      # 1. Code holen (v4 ist aktuell)
       - name: Checkout Source Code
-        uses: actions/checkout@v6
+        uses: actions/checkout@v4
         with:
           submodules: recursive
 
+      # 2. Version generieren (z.B. v2023.10.27-1400)
       - name: Generate Version Tag
         id: versioning
         shell: powershell
@@ -33,159 +35,115 @@ jobs:
           echo "VERSION_TAG=$tag" >> $env:GITHUB_ENV
           Write-Host "Version: $tag"
 
+      # 3. Compiler & Tools installieren
+      - name: Install LLVM
+        run: choco install llvm -y
+
       - name: Setup Rust Toolchain
         uses: dtolnay/rust-toolchain@stable
 
       - name: Setup Flutter
         uses: subosito/flutter-action@v2
         with:
-          flutter-version: '3.24.5'
+          flutter-version: '3.24.5' # Version fixiert für Stabilität
           channel: 'stable'
 
+      # 4. Statische Bibliotheken installieren (Wichtig für Portable!)
       - name: Install vcpkg Dependencies
         run: |
           git clone https://github.com/microsoft/vcpkg
           .\vcpkg\bootstrap-vcpkg.bat
           .\vcpkg\vcpkg install --classic libvpx:x64-windows-static libyuv:x64-windows-static opus:x64-windows-static aom:x64-windows-static
 
-      - name: Inject Configuration & Branding (Auto-Detect)
+      # 5. Deine Konfiguration "einbrennen"
+      - name: Inject Configuration & Branding
         shell: powershell
         env:
           MY_HOST: ${{ secrets.RS_HOST }}
           MY_KEY: ${{ secrets.RS_KEY }}
           MY_APP_NAME: ${{ secrets.APP_NAME }}
         run: |
-          Write-Host "Starte Konfiguration für: $env:MY_APP_NAME"
+          Write-Host "Injeziere Config für: $env:MY_APP_NAME"
 
-          # --- A. Config Datei (Server & Key) ---
+          # A. Config Datei (Server & Key)
           $foundFiles = Get-ChildItem -Path . -Recurse -Include "*.rs" | Select-String -Pattern "pub const RENDEZVOUS_SERVER" -List
-          
           if ($foundFiles) {
               $configFile = $foundFiles[0].Path
-              Write-Host "TREFFER: Config Datei gefunden: $configFile"
-              
               $content = Get-Content $configFile -Raw
-              # Server ersetzen
               $content = $content -replace 'pub const RENDEZVOUS_SERVER: &''static str = ".*?"', "pub const RENDEZVOUS_SERVER: &'static str = ""$env:MY_HOST"""
-              # Key ersetzen
               $content = $content -replace 'pub const RS_PUB_KEY: &''static str = ".*?"', "pub const RS_PUB_KEY: &'static str = ""$env:MY_KEY"""
-              
               Set-Content -Path $configFile -Value $content
-              Write-Host " -> Server & Key wurden eingetragen."
-          } else {
-              Write-Warning "WARNUNG: Config Datei nicht gefunden! Server-Daten fehlen im Build."
           }
 
-          # --- B. App Name (C++ Fenstertitel) ---
+          # B. App Name (C++ Fenster)
           $cppFiles = Get-ChildItem -Path . -Recurse -Include "main.cpp" | Select-String -Pattern 'window.Create\(L"RustDesk"' -List
-          
           if ($cppFiles) {
              $cppFile = $cppFiles[0].Path
-             Write-Host "TREFFER: Main C++ Datei gefunden: $cppFile"
-             
              $cppContent = Get-Content $cppFile -Raw
              $cppContent = $cppContent -replace 'L"RustDesk"', "L""$env:MY_APP_NAME"""
              Set-Content -Path $cppFile -Value $cppContent
-             Write-Host " -> Fenstertitel angepasst."
           }
 
-          # --- C. App Name (Pubspec Beschreibung) ---
+          # C. App Name (Pubspec)
           $pubspecFiles = Get-ChildItem -Path . -Recurse -Include "pubspec.yaml" | Select-String -Pattern "name: rustdesk" -List
           if ($pubspecFiles) {
               $pubspec = $pubspecFiles[0].Path
               (Get-Content $pubspec) -replace 'description: RustDesk', "description: $env:MY_APP_NAME" | Set-Content $pubspec
-              Write-Host " -> Pubspec Beschreibung angepasst."
           }
-          
-      - name: Install LLVM
-        run: choco install llvm -y
 
+      # 6. Bauen (Build)
       - name: Build Application
         shell: cmd
         env:
           VCPKG_ROOT: ${{ github.workspace }}\vcpkg
           VCPKG_DEFAULT_TRIPLET: x64-windows-static
         run: |
-          :: 1. Bridge-Code generieren (ohne zu packen)
+          :: Bridge-Code generieren (ohne Packen)
           python build.py --skip-portable-pack
-
-          :: 2. In den Flutter-Ordner wechseln
-          cd flutter
           
-          :: 3. Abhängigkeiten laden und bauen
+          :: Flutter App bauen
+          cd flutter
           flutter pub get
           flutter build windows --release
 
+      # 7. Verpacken (Make Portable)
       - name: Package Portable (Single File)
-        shell: cmd
+        shell: powershell
         run: |
-          # 1. Python-Tool installieren
           pip install brotli
 
-          # 2. Die EXE Datei automatisch suchen (egal ob x64 oder nicht)
-          Write-Host "Suche nach der gebauten .exe Datei..."
+          # Wir suchen die erstellte Roh-EXE
           $exeFile = Get-ChildItem -Path "flutter/build/windows" -Recurse -Filter "*.exe" | Where-Object { $_.FullName -like "*Release*" } | Select-Object -First 1
 
           if ($exeFile) {
             $buildDir = $exeFile.DirectoryName
             $exePath = $exeFile.FullName
             
-            Write-Host "GEFUNDEN: $exePath"
-            Write-Host "ORDNER: $buildDir"
-
-            # 3. Das Verpackungs-Skript aufrufen
-            # Wir übergeben den gefundenen Pfad dynamisch
-            & python libs/portable/generate.py -f "$buildDir" -o . -e "$exePath"
+            # Python Skript packt alles in eine Datei im Hauptverzeichnis (.)
+            python libs/portable/generate.py -f "$buildDir" -o . -e "$exePath"
           } else {
-            Write-Error "FEHLER: Keine .exe Datei im Build-Ordner gefunden!"
+            Write-Error "Build fehlgeschlagen: Keine EXE gefunden."
             exit 1
           }
 
-      - name: Prepare Artifact
+      # 8. Release hochladen
+      - name: Publish Release
         shell: powershell
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          # Das Python-Skript hat die portable Datei jetzt in den Hauptordner gelegt.
-          # Wir suchen die neueste EXE hier im Root (.)
-          
-          # Wir filtern nach Dateien, die NICHT im flutter/ oder vcpkg/ Ordner sind
+          # Wir suchen die Portable Datei (liegt jetzt im Root, nicht in flutter/...)
           $portableExe = Get-ChildItem -Path . -Filter "*.exe" | Where-Object { $_.FullName -notmatch "flutter|vcpkg" } | Sort-Object LastWriteTime -Descending | Select-Object -First 1
-          
+
           if ($portableExe) {
-            $finalName = "TechnikHilfe_Loske_Portable_${{ env.VERSION_TAG }}.exe"
-            Rename-Item -Path $portableExe.FullName -NewName $finalName
-            
-            echo "RELEASE_FILE=$finalName" >> $env:GITHUB_ENV
-            Write-Host "Fertige Portable Datei: $finalName"
+             $finalName = "TechnikHilfe_Loske_Portable_${{ env.VERSION_TAG }}.exe"
+             Rename-Item -Path $portableExe.FullName -NewName $finalName
+             
+             Write-Host "Erstelle Release für: $finalName"
+             
+             # Release erstellen und Datei hochladen (nutzt das offizielle GitHub CLI Tool, ist oft stabiler)
+             gh release create ${{ env.VERSION_TAG }} "$finalName" --title "Release ${{ env.VERSION_TAG }}" --notes "Automatische Portable Version."
           } else {
-            Write-Error "Portable EXE wurde nicht generiert!"
-            exit 1
+             Write-Error "Fehler: Portable EXE wurde nicht generiert."
+             exit 1
           }
-          
-      - name: Create GitHub Release
-        uses: softprops/action-gh-release@v2
-        with:
-          tag_name: ${{ env.VERSION_TAG }}
-          name: Release ${{ env.VERSION_TAG }}
-          body: |
-             TechnikHilfe Loske (Portable Version).
-             Einfach herunterladen und starten. Keine Installation nötig.
-          files: ${{ env.RELEASE_FILE }}
-
-      - name: Prepare Artifact
-        shell: powershell
-        run: |
-          $buildDir = "flutter\build\windows\runner\Release"
-          $exePath = Get-ChildItem -Path $buildDir -Filter "*.exe" | Select-Object -First 1
-          if ($exePath) {
-            $newName = "$buildDir\TechnikHilfe_Loske_${{ env.VERSION_TAG }}.exe"
-            Rename-Item -Path $exePath.FullName -NewName $newName
-            echo "RELEASE_FILE=$newName" >> $env:GITHUB_ENV
-          }
-
-      - name: Create GitHub Release
-        uses: softprops/action-gh-release@v2
-        with:
-          tag_name: ${{ env.VERSION_TAG }}
-          name: Release ${{ env.VERSION_TAG }}
-          body: Automatisches Update.
-          files: ${{ env.RELEASE_FILE }}
