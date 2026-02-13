@@ -3,6 +3,11 @@ name: Auto-Build & Release (Merge)
 on:
   push:
     branches: [ "main", "master" ]
+    paths-ignore:
+      - '.github/**'       # Ignoriert alles im .github Ordner (Workflows, Renovate, etc.)
+      - 'README.md'        # Ignoriert Änderungen an der Doku
+      - 'LICENSE'          # Ignoriert Lizenz-Änderungen
+      - 'docs/**'
   workflow_dispatch:
 
 permissions:
