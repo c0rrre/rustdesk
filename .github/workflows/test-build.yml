@@ -14,7 +14,7 @@ jobs:
     steps:
       # 1. Code holen
       - name: Checkout Source Code
-        uses: actions/checkout@v3
+        uses: actions/checkout@v6
 
       # 2. Umgebung aufsetzen
       - name: Setup Rust Toolchain
