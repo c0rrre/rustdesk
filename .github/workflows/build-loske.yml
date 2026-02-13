@@ -119,38 +119,48 @@ jobs:
       - name: Package Portable (Single File)
         shell: cmd
         run: |
-          :: --- DIESER SCHRITT MACHT EINE EINZELNE DATEI DARAUS ---
-          
-          :: 1. Benötigte Python-Bibliothek installieren
+          # 1. Python-Tool installieren
           pip install brotli
 
-          :: 2. Das Verpackungs-Skript aufrufen
-          :: -f: Wo liegen die Dateien? (Im Release Ordner)
-          :: -o: Wohin soll die fertige Datei? (Hierher: .)
-          :: -e: Welche Datei soll gestartet werden? (Die EXE im Release Ordner)
-          
-          python libs/portable/generate.py -f flutter\build\windows\runner\Release -o . -e flutter\build\windows\runner\Release\technikhilfe_loske.exe
+          # 2. Die EXE Datei automatisch suchen (egal ob x64 oder nicht)
+          Write-Host "Suche nach der gebauten .exe Datei..."
+          $exeFile = Get-ChildItem -Path "flutter/build/windows" -Recurse -Filter "*.exe" | Where-Object { $_.FullName -like "*Release*" } | Select-Object -First 1
+
+          if ($exeFile) {
+            $buildDir = $exeFile.DirectoryName
+            $exePath = $exeFile.FullName
+            
+            Write-Host "GEFUNDEN: $exePath"
+            Write-Host "ORDNER: $buildDir"
+
+            # 3. Das Verpackungs-Skript aufrufen
+            # Wir übergeben den gefundenen Pfad dynamisch
+            & python libs/portable/generate.py -f "$buildDir" -o . -e "$exePath"
+          } else {
+            Write-Error "FEHLER: Keine .exe Datei im Build-Ordner gefunden!"
+            exit 1
+          }
 
       - name: Prepare Artifact
         shell: powershell
         run: |
-          # Das Skript oben erzeugt eine Datei, die oft "rustdesk-....exe" heißt.
-          # Wir suchen die neueste EXE in diesem Ordner (nicht im flutter Unterordner!)
+          # Das Python-Skript hat die portable Datei jetzt in den Hauptordner gelegt.
+          # Wir suchen die neueste EXE hier im Root (.)
           
-          $exePath = Get-ChildItem -Path . -Filter "*.exe" | Sort-Object LastWriteTime -Descending | Select-Object -First 1
+          # Wir filtern nach Dateien, die NICHT im flutter/ oder vcpkg/ Ordner sind
+          $portableExe = Get-ChildItem -Path . -Filter "*.exe" | Where-Object { $_.FullName -notmatch "flutter|vcpkg" } | Sort-Object LastWriteTime -Descending | Select-Object -First 1
           
-          if ($exePath) {
-            # Wir benennen sie final um
-            $newName = "TechnikHilfe_Loske_Portable_${{ env.VERSION_TAG }}.exe"
-            Rename-Item -Path $exePath.FullName -NewName $newName
+          if ($portableExe) {
+            $finalName = "TechnikHilfe_Loske_Portable_${{ env.VERSION_TAG }}.exe"
+            Rename-Item -Path $portableExe.FullName -NewName $finalName
             
-            echo "RELEASE_FILE=$newName" >> $env:GITHUB_ENV
-            Write-Host "Portable Datei bereit: $newName"
+            echo "RELEASE_FILE=$finalName" >> $env:GITHUB_ENV
+            Write-Host "Fertige Portable Datei: $finalName"
           } else {
-            Write-Error "Portable EXE wurde nicht erstellt!"
+            Write-Error "Portable EXE wurde nicht generiert!"
             exit 1
           }
-
+          
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
         with:
