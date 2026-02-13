@@ -106,29 +106,55 @@ jobs:
           flutter pub get
           flutter build windows --release
 
-      # 7. Portable EXE verpacken (Single File)
+            # 7. Portable EXE verpacken (Optimiert & Schnell)
       - name: Package Portable (Single File)
         shell: powershell
         run: |
           pip install brotli
 
-          Write-Host "Suche nach der .exe Datei im gesamten Workspace..."
-          # WICHTIG: Wir suchen jetzt ab Root (.) rekursiv, um den Pfad-Fehler zu vermeiden
-          # Wir ignorieren vcpkg Ordner, um keine falschen Exen zu finden
+          Write-Host "Suche nach der Release-EXE..."
+          # Wir suchen die EXE im Release-Ordner
           $exeFile = Get-ChildItem -Path . -Recurse -Filter "*.exe" | Where-Object { $_.FullName -like "*Release*" -and $_.FullName -notmatch "vcpkg" } | Select-Object -First 1
 
           if ($exeFile) {
-            $buildDir = $exeFile.DirectoryName
-            $exePath = $exeFile.FullName
+            $sourceDir = $exeFile.DirectoryName
+            $exeName = $exeFile.Name
             
-            Write-Host "GEFUNDEN: $exePath"
+            Write-Host "QUELLE GEFUNDEN: $sourceDir"
+
+            # --- SCHRITT A: Sauberen Staging-Ordner erstellen ---
+            $stagingDir = "Temp_Portable_Staging"
+            New-Item -ItemType Directory -Path $stagingDir -Force | Out-Null
             
-            # Packen
-            python libs/portable/generate.py -f "$buildDir" -o . -e "$exePath"
+            Write-Host "Kopiere nur notwendige Dateien nach $stagingDir ..."
+            
+            # 1. Die .exe kopieren
+            Copy-Item -Path "$sourceDir\$exeName" -Destination "$stagingDir\"
+            
+            # 2. Alle .dll Dateien kopieren (WICHTIG für Flutter!)
+            Copy-Item -Path "$sourceDir\*.dll" -Destination "$stagingDir\"
+            
+            # 3. Den 'data' Ordner kopieren (Assets, Fonts)
+            if (Test-Path "$sourceDir\data") {
+                Copy-Item -Path "$sourceDir\data" -Destination "$stagingDir\" -Recurse
+            } else {
+                Write-Error "FEHLER: 'data' Ordner fehlt! Der Build ist unvollständig."
+                exit 1
+            }
+
+            # --- SCHRITT B: Packen (Geht jetzt rasend schnell) ---
+            Write-Host "Starte Verpackung..."
+            # Wir packen nun den Inhalt von $stagingDir, nicht den zugemüllten Build-Ordner
+            python libs/portable/generate.py -f "$stagingDir" -o . -e "$stagingDir\$exeName"
+            
+            # Aufräumen (Optional)
+            Remove-Item -Path $stagingDir -Recurse -Force
+            
           } else {
-            Write-Error "FEHLER: Keine Release-EXE gefunden. Prüfen Sie, ob der Build-Schritt davor erfolgreich war."
+            Write-Error "FEHLER: Keine Release-EXE gefunden."
             exit 1
           }
+
 
       # 8. Release veröffentlichen (Mit Sicherheits-Check)
       - name: Publish Release
