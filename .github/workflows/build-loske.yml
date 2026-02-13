@@ -19,13 +19,13 @@ jobs:
     runs-on: windows-2022
     
     steps:
-      # 1. Code holen (v4 ist aktuell)
+      # 1. Code auschecken
       - name: Checkout Source Code
         uses: actions/checkout@v4
         with:
           submodules: recursive
 
-      # 2. Version generieren (z.B. v2023.10.27-1400)
+      # 2. Version erstellen (z.B. v2024.01.01-1200)
       - name: Generate Version Tag
         id: versioning
         shell: powershell
@@ -48,14 +48,14 @@ jobs:
           flutter-version: '3.24.5' # Version fixiert für Stabilität
           channel: 'stable'
 
-      # 4. Statische Bibliotheken installieren (Wichtig für Portable!)
+      # 4. Abhängigkeiten installieren (Statisch für Portable!)
       - name: Install vcpkg Dependencies
         run: |
           git clone https://github.com/microsoft/vcpkg
           .\vcpkg\bootstrap-vcpkg.bat
           .\vcpkg\vcpkg install --classic libvpx:x64-windows-static libyuv:x64-windows-static opus:x64-windows-static aom:x64-windows-static
 
-      # 5. Deine Konfiguration "einbrennen"
+      # 5. Konfiguration (Server & Name) in den Code schreiben
       - name: Inject Configuration & Branding
         shell: powershell
         env:
@@ -75,7 +75,7 @@ jobs:
               Set-Content -Path $configFile -Value $content
           }
 
-          # B. App Name (C++ Fenster)
+          # B. App Name (Fenstertitel)
           $cppFiles = Get-ChildItem -Path . -Recurse -Include "main.cpp" | Select-String -Pattern 'window.Create\(L"RustDesk"' -List
           if ($cppFiles) {
              $cppFile = $cppFiles[0].Path
@@ -98,7 +98,7 @@ jobs:
           VCPKG_ROOT: ${{ github.workspace }}\vcpkg
           VCPKG_DEFAULT_TRIPLET: x64-windows-static
         run: |
-          :: Bridge-Code generieren (ohne Packen)
+          :: Bridge-Code generieren
           python build.py --skip-portable-pack
           
           :: Flutter App bauen
@@ -106,44 +106,59 @@ jobs:
           flutter pub get
           flutter build windows --release
 
-      # 7. Verpacken (Make Portable)
+      # 7. Portable EXE verpacken (Single File)
       - name: Package Portable (Single File)
         shell: powershell
         run: |
           pip install brotli
 
-          # Wir suchen die erstellte Roh-EXE
-          $exeFile = Get-ChildItem -Path "flutter/build/windows" -Recurse -Filter "*.exe" | Where-Object { $_.FullName -like "*Release*" } | Select-Object -First 1
+          Write-Host "Suche nach der .exe Datei im gesamten Workspace..."
+          # WICHTIG: Wir suchen jetzt ab Root (.) rekursiv, um den Pfad-Fehler zu vermeiden
+          # Wir ignorieren vcpkg Ordner, um keine falschen Exen zu finden
+          $exeFile = Get-ChildItem -Path . -Recurse -Filter "*.exe" | Where-Object { $_.FullName -like "*Release*" -and $_.FullName -notmatch "vcpkg" } | Select-Object -First 1
 
           if ($exeFile) {
             $buildDir = $exeFile.DirectoryName
             $exePath = $exeFile.FullName
             
-            # Python Skript packt alles in eine Datei im Hauptverzeichnis (.)
+            Write-Host "GEFUNDEN: $exePath"
+            
+            # Packen
             python libs/portable/generate.py -f "$buildDir" -o . -e "$exePath"
           } else {
-            Write-Error "Build fehlgeschlagen: Keine EXE gefunden."
+            Write-Error "FEHLER: Keine Release-EXE gefunden. Prüfen Sie, ob der Build-Schritt davor erfolgreich war."
             exit 1
           }
 
-      # 8. Release hochladen
+      # 8. Release veröffentlichen (Mit Sicherheits-Check)
       - name: Publish Release
         shell: powershell
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          # Wir suchen die Portable Datei (liegt jetzt im Root, nicht in flutter/...)
-          $portableExe = Get-ChildItem -Path . -Filter "*.exe" | Where-Object { $_.FullName -notmatch "flutter|vcpkg" } | Sort-Object LastWriteTime -Descending | Select-Object -First 1
+          # Wir suchen die Portable Datei im Root (.)
+          # Sicherheitsfilter:
+          # 1. Muss .exe sein
+          # 2. Darf nicht 'vcpkg' oder 'flutter' im Namen haben
+          # 3. Muss größer als 1MB sein (verhindert leere Fehler-Dateien)
+          # 4. Wir nehmen die NEUESTE (LastWriteTime)
+          
+          $portableExe = Get-ChildItem -Path . -Filter "*.exe" | Where-Object { $_.FullName -notmatch "flutter|vcpkg" -and $_.Length -gt 1MB } | Sort-Object LastWriteTime -Descending | Select-Object -First 1
 
           if ($portableExe) {
              $finalName = "TechnikHilfe_Loske_Portable_${{ env.VERSION_TAG }}.exe"
              Rename-Item -Path $portableExe.FullName -NewName $finalName
              
-             Write-Host "Erstelle Release für: $finalName"
+             Write-Host "GEFUNDEN: $($portableExe.Name)"
+             Write-Host "GRÖSSE: $([math]::round($portableExe.Length / 1MB, 2)) MB"
+             Write-Host "ERSTELLE RELEASE: $finalName"
              
-             # Release erstellen und Datei hochladen (nutzt das offizielle GitHub CLI Tool, ist oft stabiler)
+             # GitHub Release erstellen
              gh release create ${{ env.VERSION_TAG }} "$finalName" --title "Release ${{ env.VERSION_TAG }}" --notes "Automatische Portable Version."
           } else {
-             Write-Error "Fehler: Portable EXE wurde nicht generiert."
+             Write-Error "KRITISCHER FEHLER: Keine gültige Portable-Datei (>1MB) gefunden!"
+             # Zeige an, was überhaupt da ist (zum Debuggen)
+             Write-Host "Inhalt des Verzeichnisses:"
+             Get-ChildItem . *.exe | Select-Object Name, Length, LastWriteTime
              exit 1
           }
