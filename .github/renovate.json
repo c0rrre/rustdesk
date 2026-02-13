@@ -1,4 +1,5 @@
 {
+  "$schema": "https://docs.renovatebot.com/renovate-schema.json",
   "extends": [
     "config:recommended"
   ],
@@ -11,6 +12,18 @@
   "labels": ["dependencies"],
   "packageRules": [
     {
+      "description": "Regeln für GitHub Actions (Ihre Workflows)",
+      "matchManagers": [
+        "github-actions"
+      ],
+      "prConcurrentLimit": 99,
+      "commitMessagePrefix": "[github-action] ",
+      "reviewers": [
+        "c0rrre"
+      ]
+    },
+    {
+      "description": "Regeln für Dockerfiles (falls Sie den Server self-hosten)",
       "matchManagers": [
         "dockerfile"
       ],
@@ -21,14 +34,25 @@
       ]
     },
     {
+      "description": "Regeln für Rust (Cargo) - Das Herz von RustDesk",
       "matchManagers": [
-        "github-actions"
+        "cargo"
       ],
-      "prConcurrentLimit": 99,
-      "commitMessagePrefix": "[github-action] ",
+      "commitMessagePrefix": "[rust] ",
       "reviewers": [
         "c0rrre"
       ]
+    },
+    {
+      "description": "Regeln für Flutter/Dart (Pub) - Die Oberfläche",
+      "matchManagers": [
+        "pub"
+      ],
+      "commitMessagePrefix": "[flutter] ",
+      "reviewers": [
+        "c0rrre"
+      ],
+      "ignoreDeps": ["flutter_rust_bridge"] 
     }
   ]
 }
