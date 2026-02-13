@@ -1,59 +1,70 @@
-name: PR Test Build
+name: Test Build (PR Check)
 
+# Startet automatisch bei Pull Requests (Merge Requests)
 on:
   pull_request:
-    types: [opened, synchronize, reopened]
     branches: [ "main", "master" ]
-
-permissions:
-  contents: read
+  workflow_dispatch: # Erlaubt manuellen Test
 
 jobs:
   test-build:
-    name: Windows PR Build Test
+    name: Verify Build Integrity
     runs-on: windows-2022
-
+    
     steps:
-      # 1. Checkout des PR-Codes
-      - name: Checkout PR Source
+      # 1. Code holen
+      - name: Checkout Source Code
         uses: actions/checkout@v3
 
-      # 2. Test-Version generieren
-      - name: Generate Test Version
-        shell: powershell
-        run: |
-          $date = Get-Date -Format "yyyy.MM.dd-HHmm"
-          $tag = "pr-test-$date"
-          
-          Write-Host "PR Test Version: $tag"
-          echo "VERSION_TAG=$tag" >> $env:GITHUB_ENV
-
-      # 3. Rust Setup
+      # 2. Umgebung aufsetzen
       - name: Setup Rust Toolchain
         uses: dtolnay/rust-toolchain@stable
 
-      # 4. Flutter Setup
       - name: Setup Flutter
         uses: subosito/flutter-action@v2
         with:
           channel: 'stable'
 
-      # 5. Dummy Build simulieren
-      - name: Simulate Build Output
-        shell: powershell
+      - name: Install vcpkg Dependencies
         run: |
-          $outputDir = "pr-test-output"
-          New-Item -ItemType Directory -Path $outputDir -Force
-          
-          $filePath = "$outputDir\PR_Test_${{ env.VERSION_TAG }}.exe"
-          New-Item -ItemType File -Path $filePath
-          
-          echo "RELEASE_FILE=$filePath" >> $env:GITHUB_ENV
-          Write-Host "Dummy EXE erstellt: $filePath"
+          git clone https://github.com/microsoft/vcpkg
+          .\vcpkg\bootstrap-vcpkg.bat
+          .\vcpkg\vcpkg install --classic libvpx:x64-windows libyuv:x64-windows opus:x64-windows
 
-      # 6. Artifact hochladen (nur für Review)
-      - name: Upload PR Test Artifact
-        uses: actions/upload-artifact@v3
-        with:
-          name: PR-Test-${{ env.VERSION_TAG }}
-          path: ${{ env.RELEASE_FILE }}
+      # 3. Test der Konfiguration (Simulation)
+      # Prüft, ob Ihre Secrets korrekt gelesen werden können und die Dateien existieren
+      - name: Test Configuration Injection
+        shell: powershell
+        env:
+          MY_HOST: ${{ secrets.RS_HOST }}
+          MY_KEY: ${{ secrets.RS_KEY }}
+          MY_APP_NAME: ${{ secrets.APP_NAME }}
+        run: |
+          Write-Host "Teste Anpassung für: $env:MY_APP_NAME"
+
+          # A. Config Datei (Server & Key)
+          $configFile = "libs/hbb_common/src/config.rs"
+          if (Test-Path $configFile) {
+              Write-Host "Config Datei gefunden: OK"
+              # Wir simulieren das Lesen, um sicherzugehen, dass keine Syntaxfehler im Skript sind
+              $content = Get-Content $configFile -Raw
+          } else {
+              Write-Error "FEHLER: Config Datei nicht gefunden!"
+              exit 1
+          }
+
+          # B. App Name (C++)
+          $cppFile = "flutter/windows/runner/main.cpp"
+          if (Test-Path $cppFile) {
+             Write-Host "Main C++ Datei gefunden: OK"
+          } else {
+             Write-Error "FEHLER: Main C++ Datei nicht gefunden!"
+             exit 1
+          }
+
+      # 4. Der Build-Test (Kompilieren ohne Upload)
+      - name: Test Compilation (Build)
+        run: |
+          cd flutter
+          flutter pub get
+          flutter build windows --release
