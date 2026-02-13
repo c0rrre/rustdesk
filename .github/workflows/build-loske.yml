@@ -38,7 +38,7 @@ jobs:
         run: |
           git clone https://github.com/microsoft/vcpkg
           .\vcpkg\bootstrap-vcpkg.bat
-          .\vcpkg\vcpkg install libvpx:x64-windows libyuv:x64-windows opus:x64-windows
+          .\vcpkg\vcpkg install --classic libvpx:x64-windows libyuv:x64-windows opus:x64-windows
 
       - name: Inject Configuration & Branding
         shell: powershell
