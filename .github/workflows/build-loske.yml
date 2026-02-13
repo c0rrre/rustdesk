@@ -106,55 +106,65 @@ jobs:
           flutter pub get
           flutter build windows --release
 
-            # 7. Portable EXE verpacken (Optimiert & Schnell)
+       # 7. Portable EXE verpacken (Optimiert & Pfad-Fix)
       - name: Package Portable (Single File)
         shell: powershell
         run: |
           pip install brotli
 
-          Write-Host "Suche nach der Release-EXE..."
-          # Wir suchen die EXE im Release-Ordner
-          $exeFile = Get-ChildItem -Path . -Recurse -Filter "*.exe" | Where-Object { $_.FullName -like "*Release*" -and $_.FullName -notmatch "vcpkg" } | Select-Object -First 1
+          Write-Host "Suche nach der Flutter-Release-EXE..."
+          
+          # WICHTIG: Wir suchen NUR im Flutter-Build-Ordner, um die falsche 'target/release' EXE zu vermeiden!
+          $searchPath = "flutter/build/windows"
+          
+          if (Test-Path $searchPath) {
+              $exeFile = Get-ChildItem -Path $searchPath -Recurse -Filter "*.exe" | Where-Object { $_.FullName -like "*Release*" } | Select-Object -First 1
+          } else {
+              Write-Error "FEHLER: Der Ordner '$searchPath' existiert nicht. Build fehlgeschlagen?"
+              exit 1
+          }
 
           if ($exeFile) {
             $sourceDir = $exeFile.DirectoryName
             $exeName = $exeFile.Name
             
-            Write-Host "QUELLE GEFUNDEN: $sourceDir"
+            Write-Host "KORREKTE QUELLE GEFUNDEN: $sourceDir"
 
             # --- SCHRITT A: Sauberen Staging-Ordner erstellen ---
             $stagingDir = "Temp_Portable_Staging"
+            # Falls der Ordner vom vorherigen Lauf existiert, löschen
+            if (Test-Path $stagingDir) { Remove-Item -Path $stagingDir -Recurse -Force }
             New-Item -ItemType Directory -Path $stagingDir -Force | Out-Null
             
-            Write-Host "Kopiere nur notwendige Dateien nach $stagingDir ..."
+            Write-Host "Kopiere Dateien nach $stagingDir ..."
             
             # 1. Die .exe kopieren
             Copy-Item -Path "$sourceDir\$exeName" -Destination "$stagingDir\"
             
-            # 2. Alle .dll Dateien kopieren (WICHTIG für Flutter!)
+            # 2. Alle .dll Dateien kopieren
             Copy-Item -Path "$sourceDir\*.dll" -Destination "$stagingDir\"
             
-            # 3. Den 'data' Ordner kopieren (Assets, Fonts)
+            # 3. Den 'data' Ordner kopieren (Assets, Fonts) - Das ist der Ordner, der vorher fehlte!
             if (Test-Path "$sourceDir\data") {
                 Copy-Item -Path "$sourceDir\data" -Destination "$stagingDir\" -Recurse
             } else {
-                Write-Error "FEHLER: 'data' Ordner fehlt! Der Build ist unvollständig."
+                Write-Error "KRITISCHER FEHLER: 'data' Ordner fehlt in $sourceDir! Flutter Build war nicht erfolgreich."
                 exit 1
             }
 
-            # --- SCHRITT B: Packen (Geht jetzt rasend schnell) ---
-            Write-Host "Starte Verpackung..."
-            # Wir packen nun den Inhalt von $stagingDir, nicht den zugemüllten Build-Ordner
+            # --- SCHRITT B: Packen ---
+            Write-Host "Starte Verpackung (Single File)..."
+            
+            # Wir packen den sauberen Staging-Ordner
             python libs/portable/generate.py -f "$stagingDir" -o . -e "$stagingDir\$exeName"
             
-            # Aufräumen (Optional)
+            # Aufräumen
             Remove-Item -Path $stagingDir -Recurse -Force
             
           } else {
-            Write-Error "FEHLER: Keine Release-EXE gefunden."
+            Write-Error "FEHLER: Keine .exe im Flutter-Build-Ordner gefunden."
             exit 1
           }
-
 
       # 8. Release veröffentlichen (Mit Sicherheits-Check)
       - name: Publish Release
