@@ -25,7 +25,7 @@ jobs:
         with:
           submodules: recursive
 
-      # 2. Version erstellen (z.B. v2024.01.01-1200)
+      # 2. Version erstellen
       - name: Generate Version Tag
         id: versioning
         shell: powershell
@@ -45,17 +45,17 @@ jobs:
       - name: Setup Flutter
         uses: subosito/flutter-action@v2
         with:
-          flutter-version: '3.24.5' # Version fixiert für Stabilität
+          flutter-version: '3.24.5' # Fixiert auf stabile Version
           channel: 'stable'
 
-      # 4. Abhängigkeiten installieren (Statisch für Portable!)
+      # 4. Abhängigkeiten installieren
       - name: Install vcpkg Dependencies
         run: |
           git clone https://github.com/microsoft/vcpkg
           .\vcpkg\bootstrap-vcpkg.bat
           .\vcpkg\vcpkg install --classic libvpx:x64-windows-static libyuv:x64-windows-static opus:x64-windows-static aom:x64-windows-static
 
-      # 5. Konfiguration (Server & Name) in den Code schreiben
+      # 5. Konfiguration in den Code schreiben
       - name: Inject Configuration & Branding
         shell: powershell
         env:
@@ -73,6 +73,7 @@ jobs:
               $content = $content -replace 'pub const RENDEZVOUS_SERVER: &''static str = ".*?"', "pub const RENDEZVOUS_SERVER: &'static str = ""$env:MY_HOST"""
               $content = $content -replace 'pub const RS_PUB_KEY: &''static str = ".*?"', "pub const RS_PUB_KEY: &'static str = ""$env:MY_KEY"""
               Set-Content -Path $configFile -Value $content
+              Write-Host " -> Server & Key gesetzt in $configFile"
           }
 
           # B. App Name (Fenstertitel)
@@ -82,6 +83,7 @@ jobs:
              $cppContent = Get-Content $cppFile -Raw
              $cppContent = $cppContent -replace 'L"RustDesk"', "L""$env:MY_APP_NAME"""
              Set-Content -Path $cppFile -Value $cppContent
+             Write-Host " -> Titel gesetzt in $cppFile"
           }
 
           # C. App Name (Pubspec)
@@ -91,111 +93,93 @@ jobs:
               (Get-Content $pubspec) -replace 'description: RustDesk', "description: $env:MY_APP_NAME" | Set-Content $pubspec
           }
 
-      # 6. Bauen (Build) - KORRIGIERT: Fehler-Toleranz eingebaut
-      - name: Build Application
+      # 6. Bauen (MANUELL & STABIL)
+      # Wir nutzen nicht mehr python build.py, da dies Fehler verursacht.
+      - name: Build Application (Manual Steps)
         shell: cmd
         env:
           VCPKG_ROOT: ${{ github.workspace }}\vcpkg
           VCPKG_DEFAULT_TRIPLET: x64-windows-static
         run: |
-          echo "--- SCHRITT A: Rust Bridge Generieren ---"
-          
-          :: WICHTIG: Wir hängen "|| echo..." an.
-          :: Das bedeutet: Wenn python abstürzt (wegen dem Pack-Fehler), 
-          :: gibt er nur eine Warnung aus und macht trotzdem weiter!
-          python build.py --skip-portable-pack || echo "WARNUNG: build.py Pack-Fehler ignoriert. Wir packen spaeter selbst."
-          
+          echo "--- SCHRITT A: Bridge Generieren (Cargo) ---"
+          :: Das ist der Schritt, an dem build.py oft scheitert. Wir machen es manuell.
+          cargo run --features inline --bin flutter_bridge_codegen
+          if %errorlevel% neq 0 exit /b %errorlevel%
+
           echo "--- SCHRITT B: Flutter Build ---"
-          :: Jetzt bauen wir die eigentliche Windows-Oberfläche
           cd flutter
           flutter pub get
           flutter build windows --release
-          
-          :: Hier prüfen wir, ob Flutter erfolgreich war (das darf NICHT fehlschlagen)
           if %errorlevel% neq 0 exit /b %errorlevel%
 
-      # 7. Portable EXE verpacken (Robust & Intelligent)
+      # 7. Portable EXE verpacken (Mit Diagnose)
       - name: Package Portable (Single File)
         shell: powershell
         run: |
           pip install brotli
 
-          Write-Host "Suche nach der Release-EXE im gesamten 'flutter' Ordner..."
+          Write-Host "Suche nach Release-Dateien..."
           
-          # Wir suchen ab dem Ordner "flutter" rekursiv nach einer .exe, die "Release" im Pfad hat.
-          # Damit ist es egal, ob sie in build/windows oder build/windows/x64 liegt.
-          $exeFile = Get-ChildItem -Path "flutter" -Recurse -Filter "*.exe" -ErrorAction SilentlyContinue | Where-Object { $_.FullName -like "*Release*" } | Select-Object -First 1
+          # Wir suchen robust nach der EXE
+          $exeFile = Get-ChildItem -Path "flutter" -Recurse -Filter "*.exe" | Where-Object { $_.FullName -like "*Release*" } | Select-Object -First 1
 
           if ($exeFile) {
             $sourceDir = $exeFile.DirectoryName
             $exeName = $exeFile.Name
-            
             Write-Host "GEFUNDEN: $sourceDir\$exeName"
 
-            # --- Staging (Sauberen Ordner bauen) ---
-            $stagingDir = "Temp_Portable_Staging"
-            if (Test-Path $stagingDir) { Remove-Item -Path $stagingDir -Recurse -Force }
-            New-Item -ItemType Directory -Path $stagingDir -Force | Out-Null
+            # Staging Ordner erstellen
+            $staging = "Temp_Portable"
+            New-Item -ItemType Directory -Path $staging -Force | Out-Null
             
-            # Dateien kopieren
-            Copy-Item -Path "$sourceDir\$exeName" -Destination "$stagingDir\"
-            Copy-Item -Path "$sourceDir\*.dll" -Destination "$stagingDir\"
+            # Alles hineinkopieren
+            Copy-Item "$sourceDir\$exeName" "$staging\"
+            Copy-Item "$sourceDir\*.dll" "$staging\"
             
-            # Data Ordner finden (liegt meist neben der EXE)
+            # Data Ordner Logik
             if (Test-Path "$sourceDir\data") {
-                Copy-Item -Path "$sourceDir\data" -Destination "$stagingDir\" -Recurse
+                Copy-Item "$sourceDir\data" "$staging\" -Recurse
             } else {
-                # Fallback: Manchmal liegt data einen Ordner höher
-                $dataFallback = Get-ChildItem -Path "flutter" -Recurse -Filter "data" -Directory | Where-Object { $_.FullName -like "*build*windows*" } | Select-Object -First 1
-                if ($dataFallback) {
-                    Copy-Item -Path $dataFallback.FullName -Destination "$stagingDir\" -Recurse
+                Write-Warning "'data' Ordner nicht direkt gefunden. Suche Fallback..."
+                $data = Get-ChildItem -Path "flutter" -Recurse -Filter "data" -Directory | Where-Object { $_.FullName -like "*build*windows*" } | Select-Object -First 1
+                if ($data) { 
+                    Copy-Item $data.FullName "$staging\" -Recurse 
+                    Write-Host "Fallback data gefunden: $($data.FullName)"
                 } else {
-                    Write-Error "FEHLER: 'data' Ordner nicht gefunden. Build unvollständig."
-                    exit 1
+                     Write-Error "KRITISCH: Kein 'data' Ordner gefunden."
+                     exit 1
                 }
             }
 
-            # --- Packen ---
-            # Output (-o) ist . (Hauptverzeichnis), Input (-f) ist der Staging Ordner
-            python libs/portable/generate.py -f "$stagingDir" -o . -e "$stagingDir\$exeName"
+            # Packen
+            Write-Host "Erstelle Portable EXE..."
+            python libs/portable/generate.py -f "$staging" -o . -e "$staging\$exeName"
             
             # Aufräumen
-            Remove-Item -Path $stagingDir -Recurse -Force
+            Remove-Item $staging -Recurse -Force
           } else {
-            Write-Error "FEHLER: Keine .exe Datei im flutter-Ordner gefunden. Der Build (Schritt 6) muss fehlgeschlagen sein!"
+            # DIAGNOSE: Wenn nichts gefunden wurde, zeigen wir, was da ist.
+            Write-Error "FEHLER: Build fehlgeschlagen - Keine EXE gefunden."
+            Write-Host "--- DATEILISTE FLUTTER ORDNER (DIAGNOSE) ---"
+            Get-ChildItem -Path flutter -Recurse | Select-Object FullName
             exit 1
           }
 
-
-      # 8. Release veröffentlichen (Mit Sicherheits-Check)
+      # 8. Release
       - name: Publish Release
         shell: powershell
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          # Wir suchen die Portable Datei im Root (.)
-          # Sicherheitsfilter:
-          # 1. Muss .exe sein
-          # 2. Darf nicht 'vcpkg' oder 'flutter' im Namen haben
-          # 3. Muss größer als 1MB sein (verhindert leere Fehler-Dateien)
-          # 4. Wir nehmen die NEUESTE (LastWriteTime)
+          $finalExe = Get-ChildItem . -Filter "*.exe" | Where-Object { $_.FullName -notmatch "vcpkg|flutter" -and $_.Length -gt 1MB } | Sort-Object LastWriteTime -Descending | Select-Object -First 1
           
-          $portableExe = Get-ChildItem -Path . -Filter "*.exe" | Where-Object { $_.FullName -notmatch "flutter|vcpkg" -and $_.Length -gt 1MB } | Sort-Object LastWriteTime -Descending | Select-Object -First 1
-
-          if ($portableExe) {
-             $finalName = "TechnikHilfe_Loske_Portable_${{ env.VERSION_TAG }}.exe"
-             Rename-Item -Path $portableExe.FullName -NewName $finalName
+          if ($finalExe) {
+             $newName = "TechnikHilfe_Loske_Portable_${{ env.VERSION_TAG }}.exe"
+             Rename-Item $finalExe.FullName -NewName $newName
              
-             Write-Host "GEFUNDEN: $($portableExe.Name)"
-             Write-Host "GRÖSSE: $([math]::round($portableExe.Length / 1MB, 2)) MB"
-             Write-Host "ERSTELLE RELEASE: $finalName"
-             
-             # GitHub Release erstellen
-             gh release create ${{ env.VERSION_TAG }} "$finalName" --title "Release ${{ env.VERSION_TAG }}" --notes "Automatische Portable Version."
+             Write-Host "Upload von: $newName"
+             gh release create ${{ env.VERSION_TAG }} "$newName" --title "Release ${{ env.VERSION_TAG }}" --notes "Automatische Portable Version."
           } else {
-             Write-Error "KRITISCHER FEHLER: Keine gültige Portable-Datei (>1MB) gefunden!"
-             # Zeige an, was überhaupt da ist (zum Debuggen)
-             Write-Host "Inhalt des Verzeichnisses:"
-             Get-ChildItem . *.exe | Select-Object Name, Length, LastWriteTime
+             Write-Error "Upload fehlgeschlagen: Keine finale Datei gefunden."
              exit 1
           }
