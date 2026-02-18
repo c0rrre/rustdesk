@@ -50,7 +50,7 @@ jobs:
           ./vcpkg/bootstrap-vcpkg.bat
           ./vcpkg/vcpkg install --classic libvpx:x64-windows-static libyuv:x64-windows-static opus:x64-windows-static aom:x64-windows-static
 
-      # Config Injektion (Robuste Suche)
+      # Config Injektion (Korrigiert: Ignoriert .github Ordner)
       - name: Inject Configuration
         shell: bash
         env:
@@ -60,35 +60,35 @@ jobs:
         run: |
           echo "Suche und konfiguriere Dateien..."
           
-          # 1. Config.rs: Wir suchen die Datei, die "RENDEZVOUS_SERVER" enthält.
-          # Das verhindert, dass wir versehentlich examples/config.rs erwischen.
-          CONF_FILE=$(grep -l "pub const RENDEZVOUS_SERVER" -r . | grep -v "target" | head -n 1)
+          # 1. Config.rs
+          # WICHTIG: Wir schließen .github aus, sonst findet das Skript diese YAML-Datei hier!
+          CONF_FILE=$(grep -l "pub const RENDEZVOUS_SERVER" -r . | grep -v "target" | grep -v ".github" | head -n 1)
           
-          if [ -f "$CONF_FILE" ]; then
-             echo "Gefunden: $CONF_FILE"
+          if [ -n "$CONF_FILE" ] && [ -f "$CONF_FILE" ]; then
+             echo "Konfigurationsdatei gefunden: $CONF_FILE"
              sed -i "s|pub const RENDEZVOUS_SERVER: &'static str = \".*\";|pub const RENDEZVOUS_SERVER: &'static str = \"$MY_HOST\";|g" "$CONF_FILE"
              sed -i "s|pub const RS_PUB_KEY: &'static str = \".*\";|pub const RS_PUB_KEY: &'static str = \"$MY_KEY\";|g" "$CONF_FILE"
           else
-             echo "WARNUNG: Config.rs nicht gefunden!"
+             echo "WARNUNG: Config.rs nicht gefunden! (Server Settings werden Default sein)"
           fi
 
           # 2. App Name in C++ (Fenstertitel)
-          # Wir suchen nach der Datei main.cpp, die "RustDesk" enthält
-          CPP_FILE=$(grep -l 'window.Create(L"RustDesk"' -r flutter/windows | head -n 1)
+          # Wir suchen nur im flutter Ordner, das ist sicherer
+          CPP_FILE=$(grep -l 'window.Create(L"RustDesk"' -r flutter | head -n 1)
           
-          if [ -f "$CPP_FILE" ]; then
-             echo "Gefunden: $CPP_FILE"
+          if [ -n "$CPP_FILE" ] && [ -f "$CPP_FILE" ]; then
+             echo "C++ Datei gefunden: $CPP_FILE"
              sed -i "s|L\"RustDesk\"|L\"$MY_APP_NAME\"|g" "$CPP_FILE"
           else
              echo "WARNUNG: main.cpp nicht gefunden!"
           fi
 
           # 3. Pubspec.yaml (App Beschreibung)
-          # Wir suchen die Datei, egal wo sie liegt (meistens flutter/pubspec.yaml)
-          PUBSPEC=$(find . -name "pubspec.yaml" | grep "flutter" | head -n 1)
+          # Wir suchen explizit im flutter Ordner
+          PUBSPEC=$(find flutter -name "pubspec.yaml" | head -n 1)
           
-          if [ -f "$PUBSPEC" ]; then
-             echo "Gefunden: $PUBSPEC"
+          if [ -n "$PUBSPEC" ] && [ -f "$PUBSPEC" ]; then
+             echo "Pubspec gefunden: $PUBSPEC"
              sed -i "s|description: RustDesk|description: $MY_APP_NAME|g" "$PUBSPEC"
           else
              echo "WARNUNG: pubspec.yaml nicht gefunden!"
