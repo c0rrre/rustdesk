@@ -89,71 +89,32 @@ jobs:
              (Get-Content $p) -replace 'description: RustDesk', "description: $env:MY_APP_NAME" | Set-Content $p
           }
 
-      # 5. SCHRITT A: build.py "Operieren" und Ausführen
-      # Wir entfernen den Code, der den 'mv' Fehler verursacht, und erstellen Dummies.
-      - name: Fix and Run Build Script
+      # 5. SCHRITT A: Umgebung vorbereiten (Dummies)
+      - name: Prepare Dummy Environment
         shell: powershell
+        run: |
+          Write-Host "Erstelle Dummy-Umgebung für build.py..."
+          
+          # 1. 'resources' Ordner erstellen (fix NotADirectoryError)
+          if (!(Test-Path "resources")) { New-Item -ItemType Directory -Path "resources" -Force | Out-Null }
+          
+          # 2. 'src/ui/inline.rs' erstellen (fix Rust Compiler Fehler)
+          if (!(Test-Path "src/ui")) { New-Item -ItemType Directory -Path "src/ui" -Force }
+          Set-Content -Path "src/ui/inline.rs" -Value "pub fn get_assets() -> &'static [u8] { &[] }"
+          
+          Write-Host "Dummies erstellt."
+
+      # 6. SCHRITT B: build.py ausführen (Original, ungepatched!)
+      - name: Run Build Script (Expect Failure at End)
+        shell: cmd
         env:
           VCPKG_ROOT: ${{ github.workspace }}\vcpkg
           VCPKG_DEFAULT_TRIPLET: x64-windows-static
         run: |
-          Write-Host "--- 1. Umgebung reparieren ---"
-          # Dummy 'resources' Ordner gegen NotADirectoryError
-          New-Item -ItemType Directory -Path "resources" -Force | Out-Null
-          
-          # Dummy 'inline.rs' gegen Rust Compiler Fehler
-          if (!(Test-Path "src/ui")) { New-Item -ItemType Directory -Path "src/ui" -Force }
-          Set-Content -Path "src/ui/inline.rs" -Value "pub fn get_assets() -> &'static [u8] { &[] }"
+          echo "Starte build.py..."
+          :: Wir nutzen das Original-Skript. Es wird am Ende abstürzen (mv error).
+          :: Das ist OK, solange es vorher kompiliert. Wir fangen den Fehler mit || echo ab.
+          python build.py --skip-portable-pack || echo "WARNUNG: build.py Fehler erwartet und ignoriert."
 
-          Write-Host "--- 2. build.py patchen ---"
-          # Wir lesen build.py ein und löschen Zeilen, die 'mv ' enthalten
-          # Das verhindert den "mv: cannot stat" Fehler im Keim.
-          $buildScript = Get-Content "build.py"
-          $cleanScript = $buildScript | Where-Object { $_ -notmatch "mv " -and $_ -notmatch "cp " }
-          Set-Content "build.py" -Value $cleanScript
-          Write-Host "build.py wurde bereinigt (mv/cp Befehle entfernt)."
-
-          Write-Host "--- 3. build.py ausführen ---"
-          # Jetzt sollte es sicher durchlaufen
-          # Wir fangen Fehler trotzdem ab, um den Workflow nicht zu töten
-          try {
-            # Wir nutzen Start-Process um den Exit-Code besser zu kontrollieren
-            $proc = Start-Process python -ArgumentList "build.py --skip-portable-pack" -Wait -NoNewWindow -PassThru
-            if ($proc.ExitCode -ne 0) {
-                Write-Warning "build.py exit code: $($proc.ExitCode) (Ignoriert, wir prüfen Files manuell)"
-            }
-          } catch {
-            Write-Warning "Python Ausführung hatte Probleme."
-          }
-
-      # 6. SCHRITT B: Bridge Code retten
-      - name: Move Bridge Code
-        shell: powershell
-        run: |
-          Write-Host "Suche nach generated_bridge.dart..."
-          # Wir suchen im src/ und target/ Ordner, da build.py es dort erstellt hat
-          $bridgeFile = Get-ChildItem -Path . -Recurse -Filter "generated_bridge.dart" | Sort-Object LastWriteTime -Descending | Select-Object -First 1
-
-          if ($bridgeFile) {
-             Write-Host "GEFUNDEN: $($bridgeFile.FullName)"
-             $destDir = "flutter\lib"
-             $destFile = "$destDir\generated_bridge.dart"
-             
-             # Sicherstellen, dass Zielordner existiert
-             if (!(Test-Path $destDir)) { New-Item -ItemType Directory -Path $destDir -Force }
-             
-             Copy-Item -Path $bridgeFile.FullName -Destination $destFile -Force
-             Write-Host "Erfolgreich nach $destFile kopiert."
-          } else {
-             Write-Error "KRITISCH: generated_bridge.dart fehlt! Rust Build fehlgeschlagen."
-             exit 1
-          }
-
-      # 7. SCHRITT C: Flutter App Bauen
-      - name: Build Flutter App
-        shell: cmd
-        run: |
-          cd flutter
-          flutter pub get
-          flutter build windows --release
-          if %errorlevel% neq 0 exit /b %errorlevel%
+      # 7. SCHRITT C: Bridge Code finden & retten
+      - name: Rescue Bridge Code
