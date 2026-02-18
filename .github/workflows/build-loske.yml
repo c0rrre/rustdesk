@@ -1,4 +1,4 @@
-name: Auto-Build & Release
+name: Auto-Build & Release (Corrected)
 
 on:
   push:
@@ -118,3 +118,110 @@ jobs:
 
       # 7. SCHRITT C: Bridge Code finden & retten
       - name: Rescue Bridge Code
+        shell: powershell
+        run: |
+          Write-Host "Suche nach generated_bridge.dart (oder Variationen)..."
+          
+          # Wir suchen nach Dateien, die "bridge" im Namen haben und auf .dart enden
+          # Manchmal heißen sie bridge_generated.dart oder flutter_rust_bridge.dart
+          $bridgeFiles = Get-ChildItem -Path . -Recurse -Include "*bridge*.dart" | Where-Object { $_.FullName -notmatch "vcpkg" }
+          
+          if ($bridgeFiles) {
+             # Wir nehmen die neueste Datei
+             $latest = $bridgeFiles | Sort-Object LastWriteTime -Descending | Select-Object -First 1
+             Write-Host "GEFUNDEN: $($latest.FullName)"
+             
+             $destDir = "flutter\lib"
+             $destFile = "$destDir\generated_bridge.dart"
+             
+             # Zielordner erstellen
+             if (!(Test-Path $destDir)) { New-Item -ItemType Directory -Path $destDir -Force }
+             
+             # Kopieren
+             Copy-Item -Path $latest.FullName -Destination $destFile -Force
+             Write-Host "Erfolgreich als $destFile gespeichert."
+          } else {
+             Write-Error "KRITISCH: Keine Bridge-Datei gefunden!"
+             
+             # DEBUG: Zeige alle Dateien an, damit wir sehen, was passiert ist
+             Write-Host "--- FILE LISTING (DEBUG) ---"
+             Get-ChildItem -Path . -Recurse -Depth 3 | Select-Object FullName
+             exit 1
+          }
+
+      # 8. SCHRITT D: Flutter App Bauen
+      - name: Build Flutter App
+        shell: cmd
+        run: |
+          cd flutter
+          flutter pub get
+          flutter build windows --release
+          if %errorlevel% neq 0 exit /b %errorlevel%
+
+      # 9. SCHRITT E: Sauber Verpacken (Portable)
+      - name: Package Portable (Manual)
+        shell: powershell
+        run: |
+          pip install brotli
+
+          # 1. EXE finden
+          $exeFile = Get-ChildItem -Path "flutter" -Recurse -Filter "*.exe" | Where-Object { $_.FullName -like "*Release*" } | Select-Object -First 1
+
+          if ($exeFile) {
+            $sourceDir = $exeFile.DirectoryName
+            $exeName = $exeFile.Name
+            Write-Host "Build Quelle: $sourceDir"
+
+            # 2. Staging Ordner
+            $staging = "Temp_Portable_Staging"
+            if (Test-Path $staging) { Remove-Item $staging -Recurse -Force }
+            New-Item -ItemType Directory -Path $staging -Force | Out-Null
+            
+            Copy-Item "$sourceDir\$exeName" "$staging\"
+            Copy-Item "$sourceDir\*.dll" "$staging\"
+            
+            # 3. Data Ordner (Assets)
+            if (Test-Path "$sourceDir\data") {
+                Copy-Item "$sourceDir\data" "$staging\" -Recurse
+            } else {
+                # Fallback Suche
+                $dataFallback = Get-ChildItem -Path "flutter" -Recurse -Filter "data" -Directory | Where-Object { $_.FullName -like "*build*windows*" } | Select-Object -First 1
+                if ($dataFallback) {
+                    Copy-Item $dataFallback.FullName "$staging\" -Recurse
+                } else {
+                    Write-Error "FEHLER: 'data' Ordner fehlt."
+                    exit 1
+                }
+            }
+
+            # 4. Packen
+            Write-Host "Verpacke Portable..."
+            # Wir nutzen das generate.py Skript mit absoluten Pfaden
+            $scriptPath = (Resolve-Path "libs/portable/generate.py").Path
+            $stagingPath = (Resolve-Path $staging).Path
+            $exePath = "$stagingPath\$exeName"
+            
+            python $scriptPath -f "$stagingPath" -o . -e "$exePath"
+            
+            Remove-Item $staging -Recurse -Force
+          } else {
+            Write-Error "FEHLER: Keine .exe gefunden."
+            exit 1
+          }
+
+      # 10. Release
+      - name: Publish Release
+        shell: powershell
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          $finalExe = Get-ChildItem . -Filter "*.exe" | Where-Object { $_.FullName -notmatch "vcpkg|flutter" -and $_.Length -gt 1MB } | Sort-Object LastWriteTime -Descending | Select-Object -First 1
+          
+          if ($finalExe) {
+             $newName = "TechnikHilfe_Loske_Portable_${{ env.VERSION_TAG }}.exe"
+             Rename-Item $finalExe.FullName -NewName $newName
+             gh release create ${{ env.VERSION_TAG }} "$newName" --title "Release ${{ env.VERSION_TAG }}" --notes "Portable Version."
+          } else {
+             Write-Error "Upload fehlgeschlagen: Keine finale Datei gefunden."
+             exit 1
+          }
