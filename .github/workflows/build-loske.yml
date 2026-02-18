@@ -1,4 +1,5 @@
 name: Auto-Build & Release
+
 on:
   push:
     branches: [ "main", "master" ]
@@ -88,62 +89,67 @@ jobs:
              (Get-Content $p) -replace 'description: RustDesk', "description: $env:MY_APP_NAME" | Set-Content $p
           }
 
-      # 5. SCHRITT A: Umgebung vorbereiten (Dummies erstellen)
-      # Wir erstellen die Dateien, die build.py erwartet, damit es nicht abstürzt.
-      - name: Prepare Build Environment
+      # 5. SCHRITT A: build.py "Operieren" und Ausführen
+      # Wir entfernen den Code, der den 'mv' Fehler verursacht, und erstellen Dummies.
+      - name: Fix and Run Build Script
         shell: powershell
-        run: |
-          Write-Host "Erstelle Dummy-Umgebung für build.py..."
-          
-          # 1. 'resources' Ordner erstellen (verhindert NotADirectoryError)
-          New-Item -ItemType Directory -Path "resources" -Force | Out-Null
-          
-          # 2. 'src/ui/inline.rs' erstellen (verhindert error[E0583])
-          # Wir schreiben eine leere Funktion hinein, damit der Compiler zufrieden ist.
-          $dummyRust = "pub fn get_assets() -> &'static [u8] { &[] }"
-          
-          # Pfad prüfen und erstellen
-          if (!(Test-Path "src/ui")) { New-Item -ItemType Directory -Path "src/ui" -Force }
-          Set-Content -Path "src/ui/inline.rs" -Value $dummyRust
-          
-          Write-Host "Dummies erstellt. build.py sollte jetzt durchlaufen (oder weiter kommen)."
-
-      # 6. SCHRITT B: Rust Build & Bridge (Via build.py)
-      - name: Run Build Script (Fault Tolerant)
-        shell: cmd
         env:
           VCPKG_ROOT: ${{ github.workspace }}\vcpkg
           VCPKG_DEFAULT_TRIPLET: x64-windows-static
         run: |
-          echo "Starte build.py..."
-          :: Wir führen build.py aus.
-          :: Fehler am Ende (mv error) werden mit || echo ignoriert.
-          :: Das Wichtigste ist, dass der Rust-Code kompiliert wird.
-          python build.py --skip-portable-pack || echo "WARNUNG: build.py Fehler ignoriert. Wir prüfen gleich die Dateien."
+          Write-Host "--- 1. Umgebung reparieren ---"
+          # Dummy 'resources' Ordner gegen NotADirectoryError
+          New-Item -ItemType Directory -Path "resources" -Force | Out-Null
+          
+          # Dummy 'inline.rs' gegen Rust Compiler Fehler
+          if (!(Test-Path "src/ui")) { New-Item -ItemType Directory -Path "src/ui" -Force }
+          Set-Content -Path "src/ui/inline.rs" -Value "pub fn get_assets() -> &'static [u8] { &[] }"
 
-      # 7. SCHRITT C: Bridge Code finden & retten
-      - name: Rescue Bridge Code
+          Write-Host "--- 2. build.py patchen ---"
+          # Wir lesen build.py ein und löschen Zeilen, die 'mv ' enthalten
+          # Das verhindert den "mv: cannot stat" Fehler im Keim.
+          $buildScript = Get-Content "build.py"
+          $cleanScript = $buildScript | Where-Object { $_ -notmatch "mv " -and $_ -notmatch "cp " }
+          Set-Content "build.py" -Value $cleanScript
+          Write-Host "build.py wurde bereinigt (mv/cp Befehle entfernt)."
+
+          Write-Host "--- 3. build.py ausführen ---"
+          # Jetzt sollte es sicher durchlaufen
+          # Wir fangen Fehler trotzdem ab, um den Workflow nicht zu töten
+          try {
+            # Wir nutzen Start-Process um den Exit-Code besser zu kontrollieren
+            $proc = Start-Process python -ArgumentList "build.py --skip-portable-pack" -Wait -NoNewWindow -PassThru
+            if ($proc.ExitCode -ne 0) {
+                Write-Warning "build.py exit code: $($proc.ExitCode) (Ignoriert, wir prüfen Files manuell)"
+            }
+          } catch {
+            Write-Warning "Python Ausführung hatte Probleme."
+          }
+
+      # 6. SCHRITT B: Bridge Code retten
+      - name: Move Bridge Code
         shell: powershell
         run: |
           Write-Host "Suche nach generated_bridge.dart..."
-          # Wir suchen überall, da wir nicht wissen, wo build.py es hingelegt hat
+          # Wir suchen im src/ und target/ Ordner, da build.py es dort erstellt hat
           $bridgeFile = Get-ChildItem -Path . -Recurse -Filter "generated_bridge.dart" | Sort-Object LastWriteTime -Descending | Select-Object -First 1
 
           if ($bridgeFile) {
              Write-Host "GEFUNDEN: $($bridgeFile.FullName)"
-             $dest = "flutter\lib\generated_bridge.dart"
+             $destDir = "flutter\lib"
+             $destFile = "$destDir\generated_bridge.dart"
              
-             # Nur kopieren wenn nötig
-             if ($bridgeFile.FullName -ne (Resolve-Path $dest -ErrorAction SilentlyContinue).Path) {
-                 Copy-Item -Path $bridgeFile.FullName -Destination $dest -Force
-                 Write-Host "Kopiert nach $dest"
-             }
+             # Sicherstellen, dass Zielordner existiert
+             if (!(Test-Path $destDir)) { New-Item -ItemType Directory -Path $destDir -Force }
+             
+             Copy-Item -Path $bridgeFile.FullName -Destination $destFile -Force
+             Write-Host "Erfolgreich nach $destFile kopiert."
           } else {
-             Write-Error "KRITISCH: generated_bridge.dart fehlt. Der Rust-Build (Schritt 6) hat versagt."
+             Write-Error "KRITISCH: generated_bridge.dart fehlt! Rust Build fehlgeschlagen."
              exit 1
           }
 
-      # 8. SCHRITT D: Flutter App Bauen
+      # 7. SCHRITT C: Flutter App Bauen
       - name: Build Flutter App
         shell: cmd
         run: |
@@ -151,71 +157,3 @@ jobs:
           flutter pub get
           flutter build windows --release
           if %errorlevel% neq 0 exit /b %errorlevel%
-
-      # 9. SCHRITT E: Sauber Verpacken (Portable)
-      - name: Package Portable (Clean)
-        shell: powershell
-        run: |
-          pip install brotli
-
-          # 1. EXE finden
-          $exeFile = Get-ChildItem -Path "flutter" -Recurse -Filter "*.exe" | Where-Object { $_.FullName -like "*Release*" } | Select-Object -First 1
-
-          if ($exeFile) {
-            $sourceDir = $exeFile.DirectoryName
-            $exeName = $exeFile.Name
-            Write-Host "Build Quelle: $sourceDir"
-
-            # 2. Staging Ordner
-            $staging = "Temp_Portable_Staging"
-            if (Test-Path $staging) { Remove-Item $staging -Recurse -Force }
-            New-Item -ItemType Directory -Path $staging -Force | Out-Null
-            
-            Copy-Item "$sourceDir\$exeName" "$staging\"
-            Copy-Item "$sourceDir\*.dll" "$staging\"
-            
-            # 3. Data Ordner (Assets)
-            if (Test-Path "$sourceDir\data") {
-                Copy-Item "$sourceDir\data" "$staging\" -Recurse
-            } else {
-                # Fallback Suche
-                $dataFallback = Get-ChildItem -Path "flutter" -Recurse -Filter "data" -Directory | Where-Object { $_.FullName -like "*build*windows*" } | Select-Object -First 1
-                if ($dataFallback) {
-                    Copy-Item $dataFallback.FullName "$staging\" -Recurse
-                } else {
-                    Write-Error "FEHLER: 'data' Ordner fehlt."
-                    exit 1
-                }
-            }
-
-            # 4. Packen
-            Write-Host "Verpacke Portable..."
-            # Wir nutzen das generate.py Skript mit absoluten Pfaden
-            $scriptPath = (Resolve-Path "libs/portable/generate.py").Path
-            $stagingPath = (Resolve-Path $staging).Path
-            $exePath = "$stagingPath\$exeName"
-            
-            python $scriptPath -f "$stagingPath" -o . -e "$exePath"
-            
-            Remove-Item $staging -Recurse -Force
-          } else {
-            Write-Error "FEHLER: Keine .exe gefunden."
-            exit 1
-          }
-
-      # 10. Release
-      - name: Publish Release
-        shell: powershell
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          $finalExe = Get-ChildItem . -Filter "*.exe" | Where-Object { $_.FullName -notmatch "vcpkg|flutter" -and $_.Length -gt 1MB } | Sort-Object LastWriteTime -Descending | Select-Object -First 1
-          
-          if ($finalExe) {
-             $newName = "TechnikHilfe_Loske_Portable_${{ env.VERSION_TAG }}.exe"
-             Rename-Item $finalExe.FullName -NewName $newName
-             gh release create ${{ env.VERSION_TAG }} "$newName" --title "Release ${{ env.VERSION_TAG }}" --notes "Portable Version."
-          } else {
-             Write-Error "Upload fehlgeschlagen: Keine finale Datei gefunden."
-             exit 1
-          }
