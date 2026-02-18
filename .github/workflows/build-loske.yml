@@ -50,7 +50,7 @@ jobs:
           ./vcpkg/bootstrap-vcpkg.bat
           ./vcpkg/vcpkg install --classic libvpx:x64-windows-static libyuv:x64-windows-static opus:x64-windows-static aom:x64-windows-static
 
-      # Config Injektion (Korrigiert: Ignoriert .github Ordner)
+      # Config Injektion (Fail-Safe & Multi-Path)
       - name: Inject Configuration
         shell: bash
         env:
@@ -58,42 +58,54 @@ jobs:
           MY_KEY: ${{ secrets.RS_KEY }}
           MY_APP_NAME: ${{ secrets.APP_NAME }}
         run: |
-          echo "Suche und konfiguriere Dateien..."
-          
-          # 1. Config.rs
-          # WICHTIG: Wir schließen .github aus, sonst findet das Skript diese YAML-Datei hier!
-          CONF_FILE=$(grep -l "pub const RENDEZVOUS_SERVER" -r . | grep -v "target" | grep -v ".github" | head -n 1)
-          
-          if [ -n "$CONF_FILE" ] && [ -f "$CONF_FILE" ]; then
-             echo "Konfigurationsdatei gefunden: $CONF_FILE"
-             sed -i "s|pub const RENDEZVOUS_SERVER: &'static str = \".*\";|pub const RENDEZVOUS_SERVER: &'static str = \"$MY_HOST\";|g" "$CONF_FILE"
-             sed -i "s|pub const RS_PUB_KEY: &'static str = \".*\";|pub const RS_PUB_KEY: &'static str = \"$MY_KEY\";|g" "$CONF_FILE"
-          else
-             echo "WARNUNG: Config.rs nicht gefunden! (Server Settings werden Default sein)"
+          echo "Start Configuration Injection..."
+
+          # --- TEIL 1: Server Config (config.rs) ---
+          # Wir prüfen beide möglichen Orte. Wenn beide existieren, ändern wir beide.
+          # Das ist sicherer als zu raten.
+          POSSIBLE_CONFIGS=("src/config.rs" "libs/hbb_common/src/config.rs")
+          CONFIG_FOUND=false
+
+          for CONF_FILE in "${POSSIBLE_CONFIGS[@]}"; do
+            if [ -f "$CONF_FILE" ]; then
+               echo "Gefunden & Bearbeite: $CONF_FILE"
+               
+               # Wir nutzen eine flexiblere Regex (.* statt exakter Leerzeichen)
+               # Und wir nutzen '#' als Trennzeichen für sed, falls der Key '/' enthält
+               sed -i "s#pub const RENDEZVOUS_SERVER.*=.*#pub const RENDEZVOUS_SERVER: \&'static str = \"$MY_HOST\";#g" "$CONF_FILE"
+               sed -i "s#pub const RS_PUB_KEY.*=.*#pub const RS_PUB_KEY: \&'static str = \"$MY_KEY\";#g" "$CONF_FILE"
+               
+               CONFIG_FOUND=true
+            fi
+          done
+
+          if [ "$CONFIG_FOUND" = false ]; then
+             echo "WARNUNG: Keine config.rs gefunden!"
+             # Wir brechen hier nicht ab, um zu sehen, ob der Rest läuft
           fi
 
-          # 2. App Name in C++ (Fenstertitel)
-          # Wir suchen nur im flutter Ordner, das ist sicherer
-          CPP_FILE=$(grep -l 'window.Create(L"RustDesk"' -r flutter | head -n 1)
+          # --- TEIL 2: App Name (main.cpp) ---
+          # Wir suchen die main.cpp im flutter Ordner
+          CPP_FILE=$(find flutter -name "main.cpp" | head -n 1)
           
-          if [ -n "$CPP_FILE" ] && [ -f "$CPP_FILE" ]; then
-             echo "C++ Datei gefunden: $CPP_FILE"
-             sed -i "s|L\"RustDesk\"|L\"$MY_APP_NAME\"|g" "$CPP_FILE"
+          if [ -f "$CPP_FILE" ]; then
+             echo "Bearbeite C++ Titel in: $CPP_FILE"
+             sed -i "s#L\"RustDesk\"#L\"$MY_APP_NAME\"#g" "$CPP_FILE"
           else
-             echo "WARNUNG: main.cpp nicht gefunden!"
+             echo "WARNUNG: main.cpp nicht gefunden."
           fi
 
-          # 3. Pubspec.yaml (App Beschreibung)
-          # Wir suchen explizit im flutter Ordner
+          # --- TEIL 3: Pubspec (Beschreibung) ---
           PUBSPEC=$(find flutter -name "pubspec.yaml" | head -n 1)
           
-          if [ -n "$PUBSPEC" ] && [ -f "$PUBSPEC" ]; then
-             echo "Pubspec gefunden: $PUBSPEC"
-             sed -i "s|description: RustDesk|description: $MY_APP_NAME|g" "$PUBSPEC"
+          if [ -f "$PUBSPEC" ]; then
+             echo "Bearbeite Pubspec: $PUBSPEC"
+             sed -i "s#description: RustDesk#description: $MY_APP_NAME#g" "$PUBSPEC"
           else
-             echo "WARNUNG: pubspec.yaml nicht gefunden!"
+             echo "WARNUNG: pubspec.yaml nicht gefunden."
           fi
-
+          
+          echo "Konfiguration abgeschlossen."
       # --- BUILD PROZESS ---
 
       - name: Build RustDesk Application
