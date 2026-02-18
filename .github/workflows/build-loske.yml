@@ -35,7 +35,7 @@ jobs:
           echo "VERSION_TAG=$tag" >> $env:GITHUB_ENV
           Write-Host "Version: $tag"
 
-      # 3. Compiler & Tools installieren
+      # 3. Tools installieren
       - name: Install LLVM
         run: choco install llvm -y
 
@@ -48,14 +48,14 @@ jobs:
           flutter-version: '3.24.5'
           channel: 'stable'
 
-      # 4. Abhängigkeiten installieren
+      # 4. Abhängigkeiten
       - name: Install vcpkg Dependencies
         run: |
           git clone https://github.com/microsoft/vcpkg
           .\vcpkg\bootstrap-vcpkg.bat
           .\vcpkg\vcpkg install --classic libvpx:x64-windows-static libyuv:x64-windows-static opus:x64-windows-static aom:x64-windows-static
 
-      # 5. Konfiguration (Server, Key, Branding)
+      # 5. Konfiguration
       - name: Inject Configuration
         shell: powershell
         env:
@@ -75,7 +75,7 @@ jobs:
              Set-Content -Path $path -Value $txt
           }
 
-          # App Name (C++)
+          # C++ Name
           $mainCpp = Get-ChildItem -Path . -Recurse -Include "main.cpp" | Where-Object { $_.FullName -like "*windows*runner*" } | Select-Object -First 1
           if ($mainCpp) {
              $txt = Get-Content $mainCpp.FullName -Raw
@@ -90,29 +90,45 @@ jobs:
              (Get-Content $p) -replace 'description: RustDesk', "description: $env:MY_APP_NAME" | Set-Content $p
           }
 
-      # 6. SCHRITT A: Rust Code Generieren (Smart Execution)
-      # Wir nutzen das offizielle Skript, fangen aber den bekannten Pack-Fehler ab.
-      - name: Generate Rust Bridge
-        shell: cmd
+      # 6. SCHRITT A: Rust Build & Rettungsaktion
+      - name: Build Rust & Rescue Bridge Code
+        shell: powershell
         env:
           VCPKG_ROOT: ${{ github.workspace }}\vcpkg
           VCPKG_DEFAULT_TRIPLET: x64-windows-static
         run: |
-          echo "Starte build.py für Rust-Kompilierung..."
-          
-          :: Wir führen build.py aus. Wenn es fehlschlägt (wegen Packen), machen wir trotzdem weiter.
-          python build.py --skip-portable-pack || echo "WARNUNG: build.py Fehler ignoriert. Prüfe Ergebnis..."
-          
-          :: Jetz die entscheidende Prüfung: Hat das Kompilieren geklappt?
-          if exist "flutter\lib\generated_bridge.dart" (
-              echo "ERFOLG: Rust Bridge Code wurde generiert!"
-          ) else (
-              echo "FEHLER: Rust Build ist wirklich fehlgeschlagen."
-              exit 1
-          )
+          Write-Host "--- 1. Starte build.py (Erwarteter Absturz am Ende) ---"
+          # Wir rufen Python auf, ignorieren aber den Exit-Code mit "continue" Logik
+          try {
+            cmd /c "python build.py --skip-portable-pack"
+          } catch {
+            Write-Host "Build.py Fehler abgefangen (Erwartet: Resources not found)"
+          }
+
+          Write-Host "--- 2. Suche nach generated_bridge.dart ---"
+          # Wir suchen im ganzen Projektordner nach der Datei
+          $bridgeFile = Get-ChildItem -Path . -Recurse -Filter "generated_bridge.dart" | Select-Object -First 1
+
+          if ($bridgeFile) {
+             Write-Host "GEFUNDEN: $($bridgeFile.FullName)"
+             
+             # Zielpfad definieren
+             $destDir = "flutter\lib"
+             $destFile = "$destDir\generated_bridge.dart"
+             
+             # Falls die Datei noch nicht am Ziel liegt, kopieren wir sie
+             if ($bridgeFile.FullName -ne (Resolve-Path $destFile -ErrorAction SilentlyContinue).Path) {
+                 Write-Host "Kopiere Bridge-Code nach $destDir..."
+                 Copy-Item -Path $bridgeFile.FullName -Destination $destFile -Force
+             } else {
+                 Write-Host "Datei liegt bereits am richtigen Ort."
+             }
+          } else {
+             Write-Error "KRITISCHER FEHLER: generated_bridge.dart wurde nirgendwo generiert! Der Rust-Build ist fehlgeschlagen."
+             exit 1
+          }
 
       # 7. SCHRITT B: Flutter App Bauen
-      # Wir bauen Flutter separat, um sicherzugehen, dass es sauber durchläuft.
       - name: Build Flutter App
         shell: cmd
         run: |
@@ -122,50 +138,48 @@ jobs:
           if %errorlevel% neq 0 exit /b %errorlevel%
 
       # 8. SCHRITT C: Sauber Verpacken (Portable)
-      - name: Package Portable (Manual & Clean)
+      - name: Package Portable (Clean)
         shell: powershell
         run: |
           pip install brotli
 
-          # 1. Wir suchen die gebaute EXE (Release)
+          # 1. EXE finden
           $exeFile = Get-ChildItem -Path "flutter" -Recurse -Filter "*.exe" | Where-Object { $_.FullName -like "*Release*" } | Select-Object -First 1
 
           if ($exeFile) {
             $sourceDir = $exeFile.DirectoryName
             $exeName = $exeFile.Name
-            Write-Host "Build gefunden in: $sourceDir"
+            Write-Host "Build Quelle: $sourceDir"
 
-            # 2. Sauberen Staging Ordner erstellen
+            # 2. Staging
             $staging = "Temp_Portable_Staging"
             if (Test-Path $staging) { Remove-Item $staging -Recurse -Force }
             New-Item -ItemType Directory -Path $staging -Force | Out-Null
             
-            # 3. Dateien kopieren
             Copy-Item "$sourceDir\$exeName" "$staging\"
             Copy-Item "$sourceDir\*.dll" "$staging\"
             
-            # Data Ordner (Assets)
+            # 3. Data Ordner
             if (Test-Path "$sourceDir\data") {
                 Copy-Item "$sourceDir\data" "$staging\" -Recurse
             } else {
-                # Fallback Suche
+                # Fallback
                 $dataFallback = Get-ChildItem -Path "flutter" -Recurse -Filter "data" -Directory | Where-Object { $_.FullName -like "*build*windows*" } | Select-Object -First 1
                 if ($dataFallback) {
                     Copy-Item $dataFallback.FullName "$staging\" -Recurse
                 } else {
-                    Write-Error "FEHLER: 'data' Ordner fehlt. Build unvollständig."
+                    Write-Error "FEHLER: 'data' Ordner fehlt."
                     exit 1
                 }
             }
 
-            # 4. Packen mit expliziten Pfaden (Verhindert Absturz)
-            Write-Host "Starte Komprimierung..."
+            # 4. Packen
+            Write-Host "Verpacke..."
             python libs/portable/generate.py -f "$staging" -o . -e "$staging\$exeName"
             
-            # 5. Aufräumen
             Remove-Item $staging -Recurse -Force
           } else {
-            Write-Error "FEHLER: Keine .exe gefunden. Flutter Build fehlgeschlagen."
+            Write-Error "FEHLER: Keine .exe gefunden."
             exit 1
           }
 
@@ -180,10 +194,8 @@ jobs:
           if ($finalExe) {
              $newName = "TechnikHilfe_Loske_Portable_${{ env.VERSION_TAG }}.exe"
              Rename-Item $finalExe.FullName -NewName $newName
-             
-             Write-Host "Release File: $newName"
-             gh release create ${{ env.VERSION_TAG }} "$newName" --title "Release ${{ env.VERSION_TAG }}" --notes "Portable Version (Smart Clean Build)."
+             gh release create ${{ env.VERSION_TAG }} "$newName" --title "Release ${{ env.VERSION_TAG }}" --notes "Portable Version."
           } else {
-             Write-Error "Keine Portable Datei erstellt."
+             Write-Error "Upload fehlgeschlagen."
              exit 1
           }
