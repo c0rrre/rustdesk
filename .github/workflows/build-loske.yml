@@ -50,7 +50,7 @@ jobs:
           ./vcpkg/bootstrap-vcpkg.bat
           ./vcpkg/vcpkg install --classic libvpx:x64-windows-static libyuv:x64-windows-static opus:x64-windows-static aom:x64-windows-static
 
-      # Config Injektion (angepasst für Bash)
+      # Config Injektion (Robuste Suche)
       - name: Inject Configuration
         shell: bash
         env:
@@ -58,27 +58,43 @@ jobs:
           MY_KEY: ${{ secrets.RS_KEY }}
           MY_APP_NAME: ${{ secrets.APP_NAME }}
         run: |
-          echo "Konfiguriere..."
-          # Wir nutzen sed für Text-Ersetzung (funktioniert in Bash unter Windows super)
+          echo "Suche und konfiguriere Dateien..."
           
-          # Config.rs - Achtung: Pfad kann variieren, wir suchen danach
-          CONF_FILE=$(find . -name "config.rs" | head -n 1)
+          # 1. Config.rs: Wir suchen die Datei, die "RENDEZVOUS_SERVER" enthält.
+          # Das verhindert, dass wir versehentlich examples/config.rs erwischen.
+          CONF_FILE=$(grep -l "pub const RENDEZVOUS_SERVER" -r . | grep -v "target" | head -n 1)
+          
           if [ -f "$CONF_FILE" ]; then
+             echo "Gefunden: $CONF_FILE"
              sed -i "s|pub const RENDEZVOUS_SERVER: &'static str = \".*\";|pub const RENDEZVOUS_SERVER: &'static str = \"$MY_HOST\";|g" "$CONF_FILE"
              sed -i "s|pub const RS_PUB_KEY: &'static str = \".*\";|pub const RS_PUB_KEY: &'static str = \"$MY_KEY\";|g" "$CONF_FILE"
-             echo "Config updated: $CONF_FILE"
+          else
+             echo "WARNUNG: Config.rs nicht gefunden!"
           fi
 
-          # App Name in C++
-          CPP_FILE=$(find . -name "main.cpp" | grep "windows/runner" | head -n 1)
+          # 2. App Name in C++ (Fenstertitel)
+          # Wir suchen nach der Datei main.cpp, die "RustDesk" enthält
+          CPP_FILE=$(grep -l 'window.Create(L"RustDesk"' -r flutter/windows | head -n 1)
+          
           if [ -f "$CPP_FILE" ]; then
+             echo "Gefunden: $CPP_FILE"
              sed -i "s|L\"RustDesk\"|L\"$MY_APP_NAME\"|g" "$CPP_FILE"
+          else
+             echo "WARNUNG: main.cpp nicht gefunden!"
           fi
 
-          # Pubspec
-          sed -i "s|description: RustDesk|description: $MY_APP_NAME|g" pubspec.yaml
+          # 3. Pubspec.yaml (App Beschreibung)
+          # Wir suchen die Datei, egal wo sie liegt (meistens flutter/pubspec.yaml)
+          PUBSPEC=$(find . -name "pubspec.yaml" | grep "flutter" | head -n 1)
+          
+          if [ -f "$PUBSPEC" ]; then
+             echo "Gefunden: $PUBSPEC"
+             sed -i "s|description: RustDesk|description: $MY_APP_NAME|g" "$PUBSPEC"
+          else
+             echo "WARNUNG: pubspec.yaml nicht gefunden!"
+          fi
 
-      # --- HIER BEGINNT DER OFFIZIELLE BUILD WEG ---
+      # --- BUILD PROZESS ---
 
       - name: Build RustDesk Application
         shell: bash
@@ -87,57 +103,77 @@ jobs:
           VCPKG_DEFAULT_TRIPLET: x64-windows-static
         run: |
           echo "Start Build Script..."
-          # Wir nutzen exakt die Flags aus dem originalen Repo
-          # --skip-portable-pack ist wichtig, damit das Skript nicht am Ende abstürzt
+          # Wir bauen alles (Bridge + Rust + Flutter)
+          # skip-portable-pack verhindert den Absturz am Ende
           python3 ./build.py --portable --hwcodec --flutter --vram --skip-portable-pack
           
-          echo "Build fertig. Verschiebe Dateien..."
-          # Wir erstellen den Ordner, den der Packer erwartet
-          mkdir -p rustdesk
+          echo "Build abgeschlossen. Prüfe Ergebnisse..."
           
-          # Wir verschieben den Flutter-Build Output in den rustdesk Ordner
-          # Das Original Repo macht: mv ./flutter/build/windows/x64/runner/Release ./rustdesk
-          cp -r ./flutter/build/windows/x64/runner/Release/* ./rustdesk/
+          # Wir suchen die gebaute EXE
+          BUILT_EXE=$(find flutter -name "*.exe" | grep "Release" | head -n 1)
           
-          # (Optional) Hier könnte man Treiber herunterladen, wir lassen es erstmal minimal
-          # Wichtig ist, dass die .exe jetzt in ./rustdesk/rustdesk.exe liegen sollte (oder ähnlich)
-          ls -R rustdesk/
+          if [ -f "$BUILT_EXE" ]; then
+              echo "EXE gefunden: $BUILT_EXE"
+              
+              # Ordner für den Packer vorbereiten
+              mkdir -p rustdesk
+              
+              # Alles aus dem Release-Ordner in den 'rustdesk' Ordner kopieren
+              BUILD_DIR=$(dirname "$BUILT_EXE")
+              cp -r "$BUILD_DIR"/* ./rustdesk/
+              
+              echo "Dateien bereitgestellt in ./rustdesk/"
+              ls rustdesk
+          else
+              echo "FEHLER: Keine EXE nach dem Build gefunden!"
+              exit 1
+          fi
 
-      - name: Build Self-Extracted Executable (Portable)
+      - name: Pack Portable Executable
         shell: bash
         run: |
-          echo "Bereite Portable Packer vor..."
-          
-          # Manifest anpassen (aus Original Repo kopiert)
-          sed -i '/dpiAware/d' res/manifest.xml
-          
+          echo "Installiere Python Deps..."
           pushd ./libs/portable
           pip3 install -r requirements.txt
           
           echo "Starte Generator..."
-          # WICHTIG: Wir verweisen auf den 'rustdesk' Ordner, den wir oben erstellt haben
-          # Wir suchen vorher kurz den Namen der EXE, da Flutter sie manchmal anders nennt
+          # Wir holen den Namen der EXE aus dem rustdesk Ordner
           EXE_NAME=$(find ../../rustdesk -name "*.exe" | head -n 1)
-          echo "Gefundene EXE: $EXE_NAME"
           
+          if [ -z "$EXE_NAME" ]; then
+             echo "FEHLER: Keine EXE im staging Ordner!"
+             exit 1
+          fi
+          
+          echo "Packe: $EXE_NAME"
+          # Packen
           python3 ./generate.py -f ../../rustdesk/ -o . -e "$EXE_NAME"
-          
           popd
           
-          # Das Resultat holen (Cargo packt den Packer)
-          # Im Original: mv ./target/release/rustdesk-portable-packer.exe ...
-          # Wir müssen schauen wo cargo es hingelegt hat. Meistens target/release
+          # Ergebnis sichern
+          mkdir -p release_output
+          # Der Packer nennt die Datei oft 'rustdesk-portable-packer.exe' oder ähnlich
+          PACKED_EXE=$(find libs/portable -name "*packer.exe" | head -n 1)
           
-          mkdir -p output
-          find . -name "rustdesk-portable-packer.exe" -exec cp {} ./output/TechnikHilfe_Portable_${{ env.VERSION_TAG }}.exe \;
-          
-          echo "Resultat:"
-          ls -l output/
+          if [ -f "$PACKED_EXE" ]; then
+              mv "$PACKED_EXE" "./release_output/TechnikHilfe_Portable_${{ env.VERSION_TAG }}.exe"
+              echo "Erfolg! Datei liegt in release_output."
+          else
+              # Fallback: Manchmal landet es im target Ordner
+              PACKED_EXE_2=$(find target -name "*packer.exe" | head -n 1)
+              if [ -f "$PACKED_EXE_2" ]; then
+                  mv "$PACKED_EXE_2" "./release_output/TechnikHilfe_Portable_${{ env.VERSION_TAG }}.exe"
+              else 
+                  echo "FEHLER: Gepackte Datei nicht gefunden."
+                  find . -name "*.exe"
+                  exit 1
+              fi
+          fi
 
       - name: Publish Release
         uses: softprops/action-gh-release@v1
         with:
           tag_name: ${{ env.VERSION_TAG }}
-          files: output/*.exe
+          files: release_output/*.exe
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
