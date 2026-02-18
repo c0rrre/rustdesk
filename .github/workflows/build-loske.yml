@@ -1,4 +1,4 @@
-name: Auto-Build & Release (Merge)
+name: Auto-Build & Release
 
 on:
   push:
@@ -45,7 +45,7 @@ jobs:
       - name: Setup Flutter
         uses: subosito/flutter-action@v2
         with:
-          flutter-version: '3.24.5' # Fixiert auf stabile Version
+          flutter-version: '3.24.5'
           channel: 'stable'
 
       # 4. Abhängigkeiten installieren
@@ -55,140 +55,132 @@ jobs:
           .\vcpkg\bootstrap-vcpkg.bat
           .\vcpkg\vcpkg install --classic libvpx:x64-windows-static libyuv:x64-windows-static opus:x64-windows-static aom:x64-windows-static
 
-      # 5. Konfiguration in den Code schreiben
-      - name: Inject Configuration & Branding
+      # 5. Konfiguration (Server, Key, Branding)
+      - name: Inject Configuration
         shell: powershell
         env:
           MY_HOST: ${{ secrets.RS_HOST }}
           MY_KEY: ${{ secrets.RS_KEY }}
           MY_APP_NAME: ${{ secrets.APP_NAME }}
         run: |
-          Write-Host "Injeziere Config für: $env:MY_APP_NAME"
-
-          # A. Config Datei (Server & Key)
-          $foundFiles = Get-ChildItem -Path . -Recurse -Include "*.rs" | Select-String -Pattern "pub const RENDEZVOUS_SERVER" -List
-          if ($foundFiles) {
-              $configFile = $foundFiles[0].Path
-              $content = Get-Content $configFile -Raw
-              $content = $content -replace 'pub const RENDEZVOUS_SERVER: &''static str = ".*?"', "pub const RENDEZVOUS_SERVER: &'static str = ""$env:MY_HOST"""
-              $content = $content -replace 'pub const RS_PUB_KEY: &''static str = ".*?"', "pub const RS_PUB_KEY: &'static str = ""$env:MY_KEY"""
-              Set-Content -Path $configFile -Value $content
-              Write-Host " -> Server & Key gesetzt in $configFile"
+          Write-Host "Konfiguriere Client..."
+          
+          # Config.rs
+          $files = Get-ChildItem -Path . -Recurse -Include "config.rs"
+          if ($files) {
+             $path = $files[0].FullName
+             $txt = Get-Content $path -Raw
+             $txt = $txt -replace 'pub const RENDEZVOUS_SERVER: &''static str = ".*?"', "pub const RENDEZVOUS_SERVER: &'static str = ""$env:MY_HOST"""
+             $txt = $txt -replace 'pub const RS_PUB_KEY: &''static str = ".*?"', "pub const RS_PUB_KEY: &'static str = ""$env:MY_KEY"""
+             Set-Content -Path $path -Value $txt
           }
 
-          # B. App Name (Fenstertitel)
-          $cppFiles = Get-ChildItem -Path . -Recurse -Include "main.cpp" | Select-String -Pattern 'window.Create\(L"RustDesk"' -List
-          if ($cppFiles) {
-             $cppFile = $cppFiles[0].Path
-             $cppContent = Get-Content $cppFile -Raw
-             $cppContent = $cppContent -replace 'L"RustDesk"', "L""$env:MY_APP_NAME"""
-             Set-Content -Path $cppFile -Value $cppContent
-             Write-Host " -> Titel gesetzt in $cppFile"
+          # App Name (C++)
+          $mainCpp = Get-ChildItem -Path . -Recurse -Include "main.cpp" | Where-Object { $_.FullName -like "*windows*runner*" } | Select-Object -First 1
+          if ($mainCpp) {
+             $txt = Get-Content $mainCpp.FullName -Raw
+             $txt = $txt -replace 'L"RustDesk"', "L""$env:MY_APP_NAME"""
+             Set-Content -Path $mainCpp.FullName -Value $txt
+          }
+          
+          # Pubspec
+          $pubspec = Get-ChildItem -Path . -Recurse -Include "pubspec.yaml" | Select-String -Pattern "name: rustdesk" -List | Select-Object -First 1
+          if ($pubspec) {
+             $p = $pubspec.Path
+             (Get-Content $p) -replace 'description: RustDesk', "description: $env:MY_APP_NAME" | Set-Content $p
           }
 
-          # C. App Name (Pubspec)
-          $pubspecFiles = Get-ChildItem -Path . -Recurse -Include "pubspec.yaml" | Select-String -Pattern "name: rustdesk" -List
-          if ($pubspecFiles) {
-              $pubspec = $pubspecFiles[0].Path
-              (Get-Content $pubspec) -replace 'description: RustDesk', "description: $env:MY_APP_NAME" | Set-Content $pubspec
-          }
-
-      # 6. Bauen (Der HYBRID-Weg: Python nutzen, Absturz ignorieren)
-      - name: Build Application (Hybrid)
+      # 6. SCHRITT A: Rust Bridge Code Generieren (Manuell)
+      # Wir rufen direkt das Tool auf, das den Dart-Code erzeugt.
+      - name: Generate Rust Bridge
         shell: cmd
         env:
           VCPKG_ROOT: ${{ github.workspace }}\vcpkg
           VCPKG_DEFAULT_TRIPLET: x64-windows-static
         run: |
-          echo "--- SCHRITT A: Rust Build & Bridge (via Python) ---"
-          :: Wir lassen das Skript die harte Arbeit machen.
-          :: Wenn es am Ende beim Packen abstürzt (Exit 1), ignorieren wir das mit "|| echo ..."
-          :: Das Wichtigste ist, dass davor der Rust-Code kompiliert wurde.
-          python build.py --skip-portable-pack || echo "WARNUNG: Python-Fehler ignoriert - Build geht weiter!"
-
-          echo "--- SCHRITT B: Sicherheitsprüfung ---"
-          :: Wir prüfen, ob die Bridge-Datei generiert wurde. Wenn ja, war Schritt A erfolgreich genug.
+          echo "Generiere Dart Bridge Code..."
+          cargo run --features inline --bin flutter_bridge_codegen
+          
+          :: Prüfung, ob es geklappt hat
           if not exist "flutter\lib\generated_bridge.dart" (
-              echo "KRITISCHER FEHLER: generated_bridge.dart fehlt! Der Rust-Build hat nicht funktioniert."
+              echo "FEHLER: generated_bridge.dart wurde nicht erstellt!"
               exit 1
-          ) else (
-              echo "OK: Bridge-Code gefunden."
           )
 
-          echo "--- SCHRITT C: Flutter Build ---"
+      # 7. SCHRITT B: Flutter App Bauen
+      - name: Build Flutter App
+        shell: cmd
+        run: |
           cd flutter
           flutter pub get
           flutter build windows --release
-          if %errorlevel% neq 0 exit /b %errorlevel%
 
-      # 7. Portable EXE verpacken (Mit Diagnose)
-      - name: Package Portable (Single File)
+      # 8. SCHRITT C: Sauber Verpacken (Portable)
+      - name: Package Portable (Manual & Clean)
         shell: powershell
         run: |
           pip install brotli
 
-          Write-Host "Suche nach Release-Dateien..."
-          
-          # Wir suchen robust nach der EXE
+          # 1. Wir suchen die gebaute EXE (Release)
           $exeFile = Get-ChildItem -Path "flutter" -Recurse -Filter "*.exe" | Where-Object { $_.FullName -like "*Release*" } | Select-Object -First 1
 
           if ($exeFile) {
             $sourceDir = $exeFile.DirectoryName
             $exeName = $exeFile.Name
-            Write-Host "GEFUNDEN: $sourceDir\$exeName"
+            Write-Host "Build gefunden in: $sourceDir"
 
-            # Staging Ordner erstellen
-            $staging = "Temp_Portable"
+            # 2. Sauberen Staging Ordner erstellen
+            # Hier kommt NUR rein, was der Kunde braucht. Kein Müll.
+            $staging = "Temp_Portable_Staging"
+            if (Test-Path $staging) { Remove-Item $staging -Recurse -Force }
             New-Item -ItemType Directory -Path $staging -Force | Out-Null
             
-            # Alles hineinkopieren
+            # 3. Dateien kopieren
             Copy-Item "$sourceDir\$exeName" "$staging\"
             Copy-Item "$sourceDir\*.dll" "$staging\"
             
-            # Data Ordner Logik
+            # Data Ordner (Assets)
             if (Test-Path "$sourceDir\data") {
                 Copy-Item "$sourceDir\data" "$staging\" -Recurse
             } else {
-                Write-Warning "'data' Ordner nicht direkt gefunden. Suche Fallback..."
-                $data = Get-ChildItem -Path "flutter" -Recurse -Filter "data" -Directory | Where-Object { $_.FullName -like "*build*windows*" } | Select-Object -First 1
-                if ($data) { 
-                    Copy-Item $data.FullName "$staging\" -Recurse 
-                    Write-Host "Fallback data gefunden: $($data.FullName)"
+                # Fallback Suche (falls Pfade variieren)
+                $dataFallback = Get-ChildItem -Path "flutter" -Recurse -Filter "data" -Directory | Where-Object { $_.FullName -like "*build*windows*" } | Select-Object -First 1
+                if ($dataFallback) {
+                    Copy-Item $dataFallback.FullName "$staging\" -Recurse
                 } else {
-                     Write-Error "KRITISCH: Kein 'data' Ordner gefunden."
-                     exit 1
+                    Write-Error "FEHLER: 'data' Ordner fehlt. Build unvollständig."
+                    exit 1
                 }
             }
 
-            # Packen
-            Write-Host "Erstelle Portable EXE..."
+            # 4. Das originale Pack-Skript aufrufen
+            # Wir rufen es mit unseren expliziten Pfaden auf. Das verhindert den "NotADirectory" Fehler.
+            Write-Host "Starte Komprimierung..."
             python libs/portable/generate.py -f "$staging" -o . -e "$staging\$exeName"
             
-            # Aufräumen
+            # 5. Aufräumen
             Remove-Item $staging -Recurse -Force
           } else {
-            # DIAGNOSE: Wenn nichts gefunden wurde, zeigen wir, was da ist.
-            Write-Error "FEHLER: Build fehlgeschlagen - Keine EXE gefunden."
-            Write-Host "--- DATEILISTE FLUTTER ORDNER (DIAGNOSE) ---"
-            Get-ChildItem -Path flutter -Recurse | Select-Object FullName
+            Write-Error "FEHLER: Keine .exe gefunden. Flutter Build fehlgeschlagen."
             exit 1
           }
 
-      # 8. Release
+      # 9. Release
       - name: Publish Release
         shell: powershell
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
+          # Wir suchen die Datei im Root (wurde von generate.py dort abgelegt)
           $finalExe = Get-ChildItem . -Filter "*.exe" | Where-Object { $_.FullName -notmatch "vcpkg|flutter" -and $_.Length -gt 1MB } | Sort-Object LastWriteTime -Descending | Select-Object -First 1
           
           if ($finalExe) {
              $newName = "TechnikHilfe_Loske_Portable_${{ env.VERSION_TAG }}.exe"
              Rename-Item $finalExe.FullName -NewName $newName
              
-             Write-Host "Upload von: $newName"
-             gh release create ${{ env.VERSION_TAG }} "$newName" --title "Release ${{ env.VERSION_TAG }}" --notes "Automatische Portable Version."
+             Write-Host "Release File: $newName"
+             gh release create ${{ env.VERSION_TAG }} "$newName" --title "Release ${{ env.VERSION_TAG }}" --notes "Portable Version (Clean Build)."
           } else {
-             Write-Error "Upload fehlgeschlagen: Keine finale Datei gefunden."
+             Write-Error "Keine Portable Datei erstellt."
              exit 1
           }
