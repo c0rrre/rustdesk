@@ -31,6 +31,12 @@ jobs:
           echo "VERSION_TAG=v$(date +'%Y.%m.%d-%H%M')" >> $GITHUB_ENV
           echo "FLUTTER_VERSION=3.24.5" >> $GITHUB_ENV
 
+      - name: Install Build Tools (LLVM & NASM)
+        shell: powershell
+        run: |
+          Write-Host "Installiere LLVM und NASM..."
+          choco install llvm nasm -y
+
       - name: Setup Rust Toolchain
         uses: dtolnay/rust-toolchain@stable
 
@@ -40,31 +46,28 @@ jobs:
           flutter-version: '3.24.5'
           channel: 'stable'
 
-      - name: Install Build Tools (LLVM & NASM)
-        shell: powershell
-        run: |
-          Write-Host "Installiere LLVM und NASM..."
-          choco install llvm -y
-          choco install nasm -y
+      # --- OFFIZIELLES VCPKG SETUP ---
+      - name: Setup vcpkg with Github Actions binary cache
+        uses: lukka/run-vcpkg@v11
+        with:
+          vcpkgDirectory: C:\vcpkg
+          # Wir nutzen exakt den Commit des offiziellen Repos
+          vcpkgGitCommitId: 120deac3062162151622ca4860575a33844ba10b
+          doNotCache: false
 
       - name: Install vcpkg Dependencies
-        shell: powershell
+        shell: bash
         env:
-          VCPKG_ROOT: ${{ github.workspace }}\vcpkg
+          VCPKG_ROOT: C:\vcpkg
         run: |
-          Write-Host "Klone VCPKG Paketmanager..."
-          git clone https://github.com/microsoft/vcpkg
-          
-          # WICHTIG: Wir nutzen exakt die Version, die RustDesk offiziell verwendet
-          Push-Location vcpkg
-          git reset --hard 120deac3062162151622ca4860575a33844ba10b
-          Pop-Location
-          
-          .\vcpkg\bootstrap-vcpkg.bat
-          
-          Write-Host "Installiere Abhängigkeiten aus Manifest (Das dauert einen Moment)..."
-          .\vcpkg\vcpkg install --triplet x64-windows-static --x-install-root="$env:VCPKG_ROOT\installed"
+          echo "Installiere Abhängigkeiten via Manifest (vcpkg.json)..."
+          # Dies liest die vcpkg.json und installiert alles (inkl. FFmpeg)
+          if ! $VCPKG_ROOT/vcpkg install --triplet x64-windows-static --x-install-root="$VCPKG_ROOT/installed"; then
+            echo "FEHLER: VCPKG Build fehlgeschlagen!"
+            exit 1
+          fi
 
+      # --- CONFIGURATION INJECTION ---
       - name: Inject Configuration
         shell: bash
         env:
@@ -105,24 +108,22 @@ jobs:
              sed -i "s|description: RustDesk|description: $MY_APP_NAME|g" "$PUBSPEC"
           fi
 
+      # --- BUILD PROZESS ---
       - name: Build RustDesk Application
         shell: powershell
         env:
-          VCPKG_ROOT: ${{ github.workspace }}\vcpkg
+          VCPKG_ROOT: C:\vcpkg
           VCPKG_DEFAULT_TRIPLET: x64-windows-static
         run: |
           Write-Host "Start Build Script..."
-          # Python in PowerShell aufrufen
           python build.py --portable --hwcodec --flutter --vram --skip-portable-pack
           
           Write-Host "Build abgeschlossen. Prüfe Ergebnisse..."
           
-          # Prüfen, ob der Ordner existiert, und ihn verschieben
           $sourceDir = "flutter\build\windows\x64\runner\Release"
           
           if (Test-Path $sourceDir) {
               Write-Host "Release Ordner gefunden! Verschiebe nach ./rustdesk..."
-              # Das entspricht dem 'mv' Befehl des Original-Repos
               Move-Item -Path $sourceDir -Destination "rustdesk" -Force
               Write-Host "Dateien bereitgestellt in ./rustdesk/"
           } else {
@@ -130,6 +131,7 @@ jobs:
               exit 1
           }
 
+      # --- PACKEN ---
       - name: Pack Portable Executable
         shell: powershell
         run: |
@@ -138,7 +140,6 @@ jobs:
           pip install -r requirements.txt
           
           Write-Host "Starte Generator..."
-          # Suche die EXE Datei
           $exeFile = Get-ChildItem -Path "../../rustdesk" -Filter "*.exe" | Select-Object -First 1
           
           if (-not $exeFile) {
@@ -155,7 +156,6 @@ jobs:
           # Ergebnis sichern
           New-Item -ItemType Directory -Path "release_output" -Force | Out-Null
           
-          # Suche nach der gepackten Datei (überall, falls sie in target/ landet)
           $packedExe = Get-ChildItem -Path . -Recurse -Filter "*packer.exe" | Select-Object -First 1
           
           if ($packedExe) {
