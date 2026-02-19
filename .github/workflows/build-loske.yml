@@ -46,26 +46,29 @@ jobs:
           flutter-version: '3.24.5'
           channel: 'stable'
 
-      # --- OFFIZIELLES VCPKG SETUP ---
-      - name: Setup vcpkg with Github Actions binary cache
-        uses: lukka/run-vcpkg@v11
-        with:
-          vcpkgDirectory: C:\vcpkg
-          # Wir nutzen exakt den Commit des offiziellen Repos
-          vcpkgGitCommitId: 120deac3062162151622ca4860575a33844ba10b
-          doNotCache: false
-
-      - name: Install vcpkg Dependencies
+      # --- VCPKG OHNE CACHE (Erzwingt saubere Neuinstallation) ---
+      - name: Install vcpkg Dependencies (Fresh Build)
         shell: bash
         env:
-          VCPKG_ROOT: C:\vcpkg
+          VCPKG_ROOT: C:/vcpkg
+          VCPKG_DEFAULT_HOST_TRIPLET: x64-windows-static
         run: |
-          echo "Installiere Abhängigkeiten via Manifest (vcpkg.json)..."
-          # Dies liest die vcpkg.json und installiert alles (inkl. FFmpeg)
-          if ! $VCPKG_ROOT/vcpkg install --triplet x64-windows-static --x-install-root="$VCPKG_ROOT/installed"; then
-            echo "FEHLER: VCPKG Build fehlgeschlagen!"
-            exit 1
-          fi
+          echo "Lösche Reste alter Caches..."
+          rm -rf C:/vcpkg
+          
+          echo "Klone VCPKG Paketmanager frisch nach C:\vcpkg..."
+          git clone https://github.com/microsoft/vcpkg C:/vcpkg
+          
+          echo "Wechsle zu VCPKG und setze den offiziellen RustDesk-Commit..."
+          cd C:/vcpkg
+          git reset --hard 120deac3062162151622ca4860575a33844ba10b
+          ./bootstrap-vcpkg.bat
+          
+          echo "Gehe zurück zum Quellcode..."
+          cd ${{ github.workspace }}
+          
+          echo "Installiere Abhängigkeiten aus Manifest (Das dauert ca. 10-20 Minuten!)..."
+          C:/vcpkg/vcpkg install --triplet x64-windows-static --x-install-root="C:/vcpkg/installed"
 
       # --- CONFIGURATION INJECTION ---
       - name: Inject Configuration
@@ -83,26 +86,18 @@ jobs:
             if [ -f "$CONF_FILE" ]; then
                echo "Passe Server und Key an in: $CONF_FILE"
                
-               # 1. Singular: RENDEZVOUS_SERVER
                sed -i "s|^.*pub const RENDEZVOUS_SERVER:.*$|pub const RENDEZVOUS_SERVER: \&'static str = \"$MY_HOST\";|g" "$CONF_FILE"
-               
-               # 2. Plural: RENDEZVOUS_SERVERS
                sed -i "s|^.*pub const RENDEZVOUS_SERVERS:.*$|pub const RENDEZVOUS_SERVERS: \&[\&str] = \&[\"$MY_HOST\"];|g" "$CONF_FILE"
-               
-               # 3. Public Key
                sed -i "s|^.*pub const RS_PUB_KEY:.*$|pub const RS_PUB_KEY: \&'static str = \"$MY_KEY\";|g" "$CONF_FILE"
             fi
           done
 
           echo "Passe App-Namen an..."
-          
-          # C++ Titel (Fenstername)
           CPP_FILE=$(find flutter -name "main.cpp" | head -n 1)
           if [ -f "$CPP_FILE" ]; then
              sed -i "s|L\"RustDesk\"|L\"$MY_APP_NAME\"|g" "$CPP_FILE"
           fi
 
-          # Pubspec Beschreibung
           PUBSPEC=$(find flutter -name "pubspec.yaml" | head -n 1)
           if [ -f "$PUBSPEC" ]; then
              sed -i "s|description: RustDesk|description: $MY_APP_NAME|g" "$PUBSPEC"
@@ -119,7 +114,6 @@ jobs:
           python build.py --portable --hwcodec --flutter --vram --skip-portable-pack
           
           Write-Host "Build abgeschlossen. Prüfe Ergebnisse..."
-          
           $sourceDir = "flutter\build\windows\x64\runner\Release"
           
           if (Test-Path $sourceDir) {
@@ -153,9 +147,7 @@ jobs:
           python generate.py -f "../../rustdesk/" -o . -e "$exeName"
           Pop-Location
           
-          # Ergebnis sichern
           New-Item -ItemType Directory -Path "release_output" -Force | Out-Null
-          
           $packedExe = Get-ChildItem -Path . -Recurse -Filter "*packer.exe" | Select-Object -First 1
           
           if ($packedExe) {
