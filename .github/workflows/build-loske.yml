@@ -31,9 +31,6 @@ jobs:
           echo "VERSION_TAG=v$(date +'%Y.%m.%d-%H%M')" >> $GITHUB_ENV
           echo "FLUTTER_VERSION=3.24.5" >> $GITHUB_ENV
 
-      - name: Install LLVM
-        run: choco install llvm -y
-
       - name: Setup Rust Toolchain
         uses: dtolnay/rust-toolchain@stable
 
@@ -43,6 +40,13 @@ jobs:
           flutter-version: '3.24.5'
           channel: 'stable'
 
+      - name: Install Build Tools (LLVM & NASM)
+        shell: powershell
+        run: |
+          Write-Host "Installiere LLVM und NASM..."
+          choco install llvm -y
+          choco install nasm -y
+
       - name: Install vcpkg Dependencies
         shell: powershell
         env:
@@ -50,9 +54,15 @@ jobs:
         run: |
           Write-Host "Klone VCPKG Paketmanager..."
           git clone https://github.com/microsoft/vcpkg
+          
+          # WICHTIG: Wir nutzen exakt die Version, die RustDesk offiziell verwendet
+          Push-Location vcpkg
+          git reset --hard 120deac3062162151622ca4860575a33844ba10b
+          Pop-Location
+          
           .\vcpkg\bootstrap-vcpkg.bat
           
-          Write-Host "Installiere Abhängigkeiten aus Manifest (Das kann eine Weile dauern)..."
+          Write-Host "Installiere Abhängigkeiten aus Manifest (Das dauert einen Moment)..."
           .\vcpkg\vcpkg install --triplet x64-windows-static --x-install-root="$env:VCPKG_ROOT\installed"
 
       - name: Inject Configuration
