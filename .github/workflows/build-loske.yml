@@ -46,7 +46,7 @@ jobs:
           flutter-version: '3.24.5'
           channel: 'stable'
 
-      # --- VCPKG OHNE CACHE (Erzwingt saubere Neuinstallation) ---
+            # --- VCPKG OHNE CACHE (Erzwingt saubere Neuinstallation) ---
       - name: Install vcpkg Dependencies (Fresh Build)
         shell: bash
         env:
@@ -56,20 +56,22 @@ jobs:
           echo "Lösche Reste alter Caches..."
           rm -rf C:/vcpkg
           
-          echo "Klone VCPKG Paketmanager frisch nach C:\vcpkg..."
+          echo "Klone VCPKG Paketmanager frisch nach C:/vcpkg..."
           git clone https://github.com/microsoft/vcpkg C:/vcpkg
           
           echo "Wechsle zu VCPKG und setze den offiziellen RustDesk-Commit..."
-          cd C:/vcpkg
+          # pushd merkt sich, wo wir gerade sind, und springt nach C:/vcpkg
+          pushd C:/vcpkg
           git reset --hard 120deac3062162151622ca4860575a33844ba10b
           ./bootstrap-vcpkg.bat
           
-          echo "Gehe zurück zum Quellcode..."
-          cd ${{ github.workspace }}
+          # popd springt exakt dorthin zurück, wo wir vor dem pushd waren (den Quellcode)
+          popd
           
-          echo "Installiere Abhängigkeiten aus Manifest (Das dauert ca. 10-20 Minuten!)..."
+          echo "Wieder im Quellcode-Ordner. Installiere Abhängigkeiten aus Manifest (Dauert ca. 10-20 Min)..."
           C:/vcpkg/vcpkg install --triplet x64-windows-static --x-install-root="C:/vcpkg/installed"
 
+      
       # --- CONFIGURATION INJECTION ---
       - name: Inject Configuration
         shell: bash
