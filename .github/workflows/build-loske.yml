@@ -1,4 +1,4 @@
-name: RustDesk Build (Official Fix)
+name: RustDesk Build
 
 on:
   push:
@@ -44,13 +44,12 @@ jobs:
           channel: 'stable'
 
       - name: Install vcpkg Dependencies
-        shell: bash
+        shell: powershell
         run: |
           git clone https://github.com/microsoft/vcpkg
-          ./vcpkg/bootstrap-vcpkg.bat
-          ./vcpkg/vcpkg install --classic libvpx:x64-windows-static libyuv:x64-windows-static opus:x64-windows-static aom:x64-windows-static
+          .\vcpkg\bootstrap-vcpkg.bat
+          .\vcpkg\vcpkg install --classic libvpx:x64-windows-static libyuv:x64-windows-static opus:x64-windows-static aom:x64-windows-static
 
-      # Config Injektion (Präzise & Sicher - Behebt den E0425 Fehler)
       - name: Inject Configuration
         shell: bash
         env:
@@ -67,11 +66,9 @@ jobs:
                echo "Passe Server und Key an in: $CONF_FILE"
                
                # 1. Singular: RENDEZVOUS_SERVER
-               # Wir ersetzen die komplette Zeile (^.* ... .*$), um keine Syntaxfehler zu riskieren
                sed -i "s|^.*pub const RENDEZVOUS_SERVER:.*$|pub const RENDEZVOUS_SERVER: \&'static str = \"$MY_HOST\";|g" "$CONF_FILE"
                
-               # 2. Plural: RENDEZVOUS_SERVERS (Das fehlte und verursachte den Absturz!)
-               # Wir definieren das Array neu mit unserem Host
+               # 2. Plural: RENDEZVOUS_SERVERS
                sed -i "s|^.*pub const RENDEZVOUS_SERVERS:.*$|pub const RENDEZVOUS_SERVERS: \&[\&str] = \&[\"$MY_HOST\"];|g" "$CONF_FILE"
                
                # 3. Public Key
@@ -93,67 +90,67 @@ jobs:
              sed -i "s|description: RustDesk|description: $MY_APP_NAME|g" "$PUBSPEC"
           fi
 
-      # --- BUILD PROZESS ---
-
       - name: Build RustDesk Application
-        shell: bash
+        shell: powershell
         env:
-          VCPKG_ROOT: ${{ github.workspace }}/vcpkg
+          VCPKG_ROOT: ${{ github.workspace }}\vcpkg
           VCPKG_DEFAULT_TRIPLET: x64-windows-static
         run: |
-          echo "Start Build Script..."
-          python3 ./build.py --portable --hwcodec --flutter --vram --skip-portable-pack
+          Write-Host "Start Build Script..."
+          # Python in PowerShell aufrufen
+          python build.py --portable --hwcodec --flutter --vram --skip-portable-pack
           
-          echo "Build abgeschlossen. Prüfe Ergebnisse..."
-          BUILT_EXE=$(find flutter -name "*.exe" | grep "Release" | head -n 1)
+          Write-Host "Build abgeschlossen. Prüfe Ergebnisse..."
           
-          if [ -f "$BUILT_EXE" ]; then
-              echo "EXE gefunden: $BUILT_EXE"
-              mkdir -p rustdesk
-              BUILD_DIR=$(dirname "$BUILT_EXE")
-              cp -r "$BUILD_DIR"/* ./rustdesk/
-              echo "Dateien bereitgestellt in ./rustdesk/"
-          else
-              echo "FEHLER: Keine EXE nach dem Build gefunden!"
+          # Prüfen, ob der Ordner existiert, und ihn verschieben
+          $sourceDir = "flutter\build\windows\x64\runner\Release"
+          
+          if (Test-Path $sourceDir) {
+              Write-Host "Release Ordner gefunden! Verschiebe nach ./rustdesk..."
+              # Das entspricht dem 'mv' Befehl des Original-Repos
+              Move-Item -Path $sourceDir -Destination "rustdesk" -Force
+              Write-Host "Dateien bereitgestellt in ./rustdesk/"
+          } else {
+              Write-Error "FEHLER: Release Ordner nach dem Build nicht gefunden!"
               exit 1
-          fi
+          }
 
       - name: Pack Portable Executable
-        shell: bash
+        shell: powershell
         run: |
-          echo "Installiere Python Deps..."
-          pushd ./libs/portable
-          pip3 install -r requirements.txt
+          Write-Host "Installiere Python Deps..."
+          Push-Location ./libs/portable
+          pip install -r requirements.txt
           
-          echo "Starte Generator..."
-          EXE_NAME=$(find ../../rustdesk -name "*.exe" | head -n 1)
+          Write-Host "Starte Generator..."
+          # Suche die EXE Datei
+          $exeFile = Get-ChildItem -Path "../../rustdesk" -Filter "*.exe" | Select-Object -First 1
           
-          if [ -z "$EXE_NAME" ]; then
-             echo "FEHLER: Keine EXE im staging Ordner!"
+          if (-not $exeFile) {
+             Write-Error "FEHLER: Keine EXE im staging Ordner!"
              exit 1
-          fi
+          }
           
-          echo "Packe: $EXE_NAME"
-          python3 ./generate.py -f ../../rustdesk/ -o . -e "$EXE_NAME"
-          popd
+          $exeName = $exeFile.Name
+          Write-Host "Packe: $exeName"
+          
+          python generate.py -f "../../rustdesk/" -o . -e "$exeName"
+          Pop-Location
           
           # Ergebnis sichern
-          mkdir -p release_output
-          PACKED_EXE=$(find libs/portable -name "*packer.exe" | head -n 1)
+          New-Item -ItemType Directory -Path "release_output" -Force | Out-Null
           
-          if [ -f "$PACKED_EXE" ]; then
-              mv "$PACKED_EXE" "./release_output/TechnikHilfe_Portable_${{ env.VERSION_TAG }}.exe"
-              echo "Erfolg! Datei liegt in release_output."
-          else
-              PACKED_EXE_2=$(find target -name "*packer.exe" | head -n 1)
-              if [ -f "$PACKED_EXE_2" ]; then
-                  mv "$PACKED_EXE_2" "./release_output/TechnikHilfe_Portable_${{ env.VERSION_TAG }}.exe"
-              else 
-                  echo "FEHLER: Gepackte Datei nicht gefunden."
-                  find . -name "*.exe"
-                  exit 1
-              fi
-          fi
+          # Suche nach der gepackten Datei (überall, falls sie in target/ landet)
+          $packedExe = Get-ChildItem -Path . -Recurse -Filter "*packer.exe" | Select-Object -First 1
+          
+          if ($packedExe) {
+              $newName = "./release_output/TechnikHilfe_Portable_${{ env.VERSION_TAG }}.exe"
+              Move-Item -Path $packedExe.FullName -Destination $newName -Force
+              Write-Host "Erfolg! Datei wurde erstellt: $newName"
+          } else {
+              Write-Error "FEHLER: Gepackte Datei nicht gefunden."
+              exit 1
+          }
 
       - name: Publish Release
         uses: softprops/action-gh-release@v1
