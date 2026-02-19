@@ -1,4 +1,4 @@
-name: RustDesk Build
+name: RustDesk Build (Official Fix)
 
 on:
   push:
@@ -50,7 +50,7 @@ jobs:
           ./vcpkg/bootstrap-vcpkg.bat
           ./vcpkg/vcpkg install --classic libvpx:x64-windows-static libyuv:x64-windows-static opus:x64-windows-static aom:x64-windows-static
 
-      # Config Injektion (Fail-Safe & Multi-Path)
+      # Config Injektion (Präzise & Sicher - Behebt den E0425 Fehler)
       - name: Inject Configuration
         shell: bash
         env:
@@ -60,52 +60,39 @@ jobs:
         run: |
           echo "Start Configuration Injection..."
 
-          # --- TEIL 1: Server Config (config.rs) ---
-          # Wir prüfen beide möglichen Orte. Wenn beide existieren, ändern wir beide.
-          # Das ist sicherer als zu raten.
           POSSIBLE_CONFIGS=("src/config.rs" "libs/hbb_common/src/config.rs")
-          CONFIG_FOUND=false
-
+          
           for CONF_FILE in "${POSSIBLE_CONFIGS[@]}"; do
             if [ -f "$CONF_FILE" ]; then
-               echo "Gefunden & Bearbeite: $CONF_FILE"
+               echo "Passe Server und Key an in: $CONF_FILE"
                
-               # Wir nutzen eine flexiblere Regex (.* statt exakter Leerzeichen)
-               # Und wir nutzen '#' als Trennzeichen für sed, falls der Key '/' enthält
-               sed -i "s#pub const RENDEZVOUS_SERVER.*=.*#pub const RENDEZVOUS_SERVER: \&'static str = \"$MY_HOST\";#g" "$CONF_FILE"
-               sed -i "s#pub const RS_PUB_KEY.*=.*#pub const RS_PUB_KEY: \&'static str = \"$MY_KEY\";#g" "$CONF_FILE"
+               # 1. Singular: RENDEZVOUS_SERVER
+               # Wir ersetzen die komplette Zeile (^.* ... .*$), um keine Syntaxfehler zu riskieren
+               sed -i "s|^.*pub const RENDEZVOUS_SERVER:.*$|pub const RENDEZVOUS_SERVER: \&'static str = \"$MY_HOST\";|g" "$CONF_FILE"
                
-               CONFIG_FOUND=true
+               # 2. Plural: RENDEZVOUS_SERVERS (Das fehlte und verursachte den Absturz!)
+               # Wir definieren das Array neu mit unserem Host
+               sed -i "s|^.*pub const RENDEZVOUS_SERVERS:.*$|pub const RENDEZVOUS_SERVERS: \&[\&str] = \&[\"$MY_HOST\"];|g" "$CONF_FILE"
+               
+               # 3. Public Key
+               sed -i "s|^.*pub const RS_PUB_KEY:.*$|pub const RS_PUB_KEY: \&'static str = \"$MY_KEY\";|g" "$CONF_FILE"
             fi
           done
 
-          if [ "$CONFIG_FOUND" = false ]; then
-             echo "WARNUNG: Keine config.rs gefunden!"
-             # Wir brechen hier nicht ab, um zu sehen, ob der Rest läuft
-          fi
-
-          # --- TEIL 2: App Name (main.cpp) ---
-          # Wir suchen die main.cpp im flutter Ordner
+          echo "Passe App-Namen an..."
+          
+          # C++ Titel (Fenstername)
           CPP_FILE=$(find flutter -name "main.cpp" | head -n 1)
-          
           if [ -f "$CPP_FILE" ]; then
-             echo "Bearbeite C++ Titel in: $CPP_FILE"
-             sed -i "s#L\"RustDesk\"#L\"$MY_APP_NAME\"#g" "$CPP_FILE"
-          else
-             echo "WARNUNG: main.cpp nicht gefunden."
+             sed -i "s|L\"RustDesk\"|L\"$MY_APP_NAME\"|g" "$CPP_FILE"
           fi
 
-          # --- TEIL 3: Pubspec (Beschreibung) ---
+          # Pubspec Beschreibung
           PUBSPEC=$(find flutter -name "pubspec.yaml" | head -n 1)
-          
           if [ -f "$PUBSPEC" ]; then
-             echo "Bearbeite Pubspec: $PUBSPEC"
-             sed -i "s#description: RustDesk#description: $MY_APP_NAME#g" "$PUBSPEC"
-          else
-             echo "WARNUNG: pubspec.yaml nicht gefunden."
+             sed -i "s|description: RustDesk|description: $MY_APP_NAME|g" "$PUBSPEC"
           fi
-          
-          echo "Konfiguration abgeschlossen."
+
       # --- BUILD PROZESS ---
 
       - name: Build RustDesk Application
@@ -115,27 +102,17 @@ jobs:
           VCPKG_DEFAULT_TRIPLET: x64-windows-static
         run: |
           echo "Start Build Script..."
-          # Wir bauen alles (Bridge + Rust + Flutter)
-          # skip-portable-pack verhindert den Absturz am Ende
           python3 ./build.py --portable --hwcodec --flutter --vram --skip-portable-pack
           
           echo "Build abgeschlossen. Prüfe Ergebnisse..."
-          
-          # Wir suchen die gebaute EXE
           BUILT_EXE=$(find flutter -name "*.exe" | grep "Release" | head -n 1)
           
           if [ -f "$BUILT_EXE" ]; then
               echo "EXE gefunden: $BUILT_EXE"
-              
-              # Ordner für den Packer vorbereiten
               mkdir -p rustdesk
-              
-              # Alles aus dem Release-Ordner in den 'rustdesk' Ordner kopieren
               BUILD_DIR=$(dirname "$BUILT_EXE")
               cp -r "$BUILD_DIR"/* ./rustdesk/
-              
               echo "Dateien bereitgestellt in ./rustdesk/"
-              ls rustdesk
           else
               echo "FEHLER: Keine EXE nach dem Build gefunden!"
               exit 1
@@ -149,7 +126,6 @@ jobs:
           pip3 install -r requirements.txt
           
           echo "Starte Generator..."
-          # Wir holen den Namen der EXE aus dem rustdesk Ordner
           EXE_NAME=$(find ../../rustdesk -name "*.exe" | head -n 1)
           
           if [ -z "$EXE_NAME" ]; then
@@ -158,20 +134,17 @@ jobs:
           fi
           
           echo "Packe: $EXE_NAME"
-          # Packen
           python3 ./generate.py -f ../../rustdesk/ -o . -e "$EXE_NAME"
           popd
           
           # Ergebnis sichern
           mkdir -p release_output
-          # Der Packer nennt die Datei oft 'rustdesk-portable-packer.exe' oder ähnlich
           PACKED_EXE=$(find libs/portable -name "*packer.exe" | head -n 1)
           
           if [ -f "$PACKED_EXE" ]; then
               mv "$PACKED_EXE" "./release_output/TechnikHilfe_Portable_${{ env.VERSION_TAG }}.exe"
               echo "Erfolg! Datei liegt in release_output."
           else
-              # Fallback: Manchmal landet es im target Ordner
               PACKED_EXE_2=$(find target -name "*packer.exe" | head -n 1)
               if [ -f "$PACKED_EXE_2" ]; then
                   mv "$PACKED_EXE_2" "./release_output/TechnikHilfe_Portable_${{ env.VERSION_TAG }}.exe"
