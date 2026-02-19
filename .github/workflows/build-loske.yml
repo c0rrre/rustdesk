@@ -105,12 +105,17 @@ jobs:
              sed -i "s|description: RustDesk|description: $MY_APP_NAME|g" "$PUBSPEC"
           fi
 
+            # --- GENERATE BRIDGE ---
       - name: Generate Flutter Rust Bridge
         shell: bash
         run: |
           echo "Installiere flutter_rust_bridge_codegen..."
-          # RustDesk 1.4.x nutzt Version ~1.80 der Bridge
           cargo install flutter_rust_bridge_codegen --version 1.80.1
+          
+          echo "Hole Flutter Abhängigkeiten (wird für ffigen benötigt)..."
+          pushd flutter
+          flutter pub get
+          popd
           
           echo "Generiere Übersetzer-Dateien (Bridge) für Rust und Dart..."
           flutter_rust_bridge_codegen \
@@ -121,7 +126,7 @@ jobs:
           
           echo "Bridge erfolgreich generiert!"
 
-
+      
       # --- BUILD PROZESS ---
       - name: Build RustDesk Application
         shell: powershell
