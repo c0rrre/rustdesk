@@ -45,10 +45,15 @@ jobs:
 
       - name: Install vcpkg Dependencies
         shell: powershell
+        env:
+          VCPKG_ROOT: ${{ github.workspace }}\vcpkg
         run: |
+          Write-Host "Klone VCPKG Paketmanager..."
           git clone https://github.com/microsoft/vcpkg
           .\vcpkg\bootstrap-vcpkg.bat
-          .\vcpkg\vcpkg install --classic libvpx:x64-windows-static libyuv:x64-windows-static opus:x64-windows-static aom:x64-windows-static
+          
+          Write-Host "Installiere Abhängigkeiten aus Manifest (Das kann eine Weile dauern)..."
+          .\vcpkg\vcpkg install --triplet x64-windows-static --x-install-root="$env:VCPKG_ROOT\installed"
 
       - name: Inject Configuration
         shell: bash
