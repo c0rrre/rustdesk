@@ -1,4 +1,4 @@
-name: RustDesk Build
+name: RustDesk Custom Build
 
 on:
   push:
@@ -27,15 +27,67 @@ jobs:
       - name: Setup Environment Variables
         shell: bash
         run: |
-          # Version Tag generieren
           echo "VERSION_TAG=v$(date +'%Y.%m.%d-%H%M')" >> $GITHUB_ENV
           echo "FLUTTER_VERSION=3.24.5" >> $GITHUB_ENV
 
+      # --- 1. BRANDING ANWENDEN (Logo & Name) ---
+      - name: Apply Custom Branding
+        shell: bash
+        env:
+          MY_APP_NAME: ${{ secrets.APP_NAME }}
+        run: |
+          echo "Wende Branding an..."
+          
+          # App Name in diversen Dateien ändern
+          if [ -n "$MY_APP_NAME" ]; then
+             sed -i "s|description: RustDesk|description: $MY_APP_NAME|g" flutter/pubspec.yaml
+             find flutter -name "main.cpp" -exec sed -i "s|L\"RustDesk\"|L\"$MY_APP_NAME\"|g" {} +
+             find flutter -name "Runner.rc" -exec sed -i "s|VALUE \"FileDescription\", \"RustDesk\"|VALUE \"FileDescription\", \"$MY_APP_NAME\"|g" {} +
+             find flutter -name "Runner.rc" -exec sed -i "s|VALUE \"ProductName\", \"RustDesk\"|VALUE \"ProductName\", \"$MY_APP_NAME\"|g" {} +
+          fi
+
+          # Logos kopieren (wenn vorhanden)
+          if [ -f "app_icon.ico" ]; then cp "app_icon.ico" "flutter/windows/runner/resources/app_icon.ico"; fi
+          if [ -f "logo.png" ]; then cp "logo.png" "flutter/assets/images/logo.png"; fi
+
+      # --- 2. SERVER KONFIGURATION INJEZIEREN ---
+      - name: Inject Server Configuration
+        shell: bash
+        env:
+          # Hier holen wir deine 3 Variablen aus den Secrets
+          VAL_API: ${{ secrets.API_SERVER }}
+          VAL_REND: ${{ secrets.RENDEZVOUS_SERVER }}
+          VAL_KEY: ${{ secrets.RS_PUB_KEY }}
+        run: |
+          echo "Suche Konfigurationsdateien..."
+          
+          # Wir suchen an beiden möglichen Orten nach der Config
+          TARGETS=("src/config.rs" "libs/hbb_common/src/config.rs")
+          
+          for CONF in "${TARGETS[@]}"; do
+            if [ -f "$CONF" ]; then
+              echo "Bearbeite: $CONF"
+              
+              # 1. API SERVER (Wichtig für Pro/Web Funktionen)
+              sed -i "s|^.*pub const API_SERVER:.*$|pub const API_SERVER: \&'static str = \"$VAL_API\";|g" "$CONF"
+              
+              # 2. RENDEZVOUS SERVER (Der eigentliche Verbindungsserver)
+              sed -i "s|^.*pub const RENDEZVOUS_SERVER:.*$|pub const RENDEZVOUS_SERVER: \&'static str = \"$VAL_REND\";|g" "$CONF"
+              
+              # 3. RENDEZVOUS SERVERS (Plural - muss auch gesetzt werden!)
+              sed -i "s|^.*pub const RENDEZVOUS_SERVERS:.*$|pub const RENDEZVOUS_SERVERS: \&[\&str] = \&[\"$VAL_REND\"];|g" "$CONF"
+              
+              # 4. PUBLIC KEY (Verschlüsselung)
+              sed -i "s|^.*pub const RS_PUB_KEY:.*$|pub const RS_PUB_KEY: \&'static str = \"$VAL_KEY\";|g" "$CONF"
+              
+              echo "Konfiguration erfolgreich angewendet."
+            fi
+          done
+
+      # --- 3. BUILD TOOLS INSTALLIEREN ---
       - name: Install Build Tools (LLVM & NASM)
         shell: powershell
-        run: |
-          Write-Host "Installiere LLVM und NASM..."
-          choco install llvm nasm -y
+        run: choco install llvm nasm -y
 
       - name: Setup Rust Toolchain
         uses: dtolnay/rust-toolchain@stable
@@ -46,140 +98,72 @@ jobs:
           flutter-version: '3.24.5'
           channel: 'stable'
 
-            # --- VCPKG OHNE CACHE (Erzwingt saubere Neuinstallation) ---
-      - name: Install vcpkg Dependencies (Fresh Build)
+      # --- 4. ABHÄNGIGKEITEN (VCPKG CLEAN BUILD) ---
+      - name: Install vcpkg Dependencies
         shell: bash
-        env:
-          VCPKG_ROOT: C:/vcpkg
-          VCPKG_DEFAULT_HOST_TRIPLET: x64-windows-static
         run: |
-          echo "Lösche Reste alter Caches..."
           rm -rf C:/vcpkg
-          
-          echo "Klone VCPKG Paketmanager frisch nach C:/vcpkg..."
           git clone https://github.com/microsoft/vcpkg C:/vcpkg
-          
-          echo "Wechsle zu VCPKG und setze den offiziellen RustDesk-Commit..."
-          # pushd merkt sich, wo wir gerade sind, und springt nach C:/vcpkg
           pushd C:/vcpkg
           git reset --hard 120deac3062162151622ca4860575a33844ba10b
           ./bootstrap-vcpkg.bat
-          
-          # popd springt exakt dorthin zurück, wo wir vor dem pushd waren (den Quellcode)
           popd
-          
-          echo "Wieder im Quellcode-Ordner. Installiere Abhängigkeiten aus Manifest (Dauert ca. 10-20 Min)..."
+          # Installiert FFmpeg, HWCodec, etc.
           C:/vcpkg/vcpkg install --triplet x64-windows-static --x-install-root="C:/vcpkg/installed"
 
-      
-      # --- CONFIGURATION INJECTION ---
-      - name: Inject Configuration
-        shell: bash
-        env:
-          MY_HOST: ${{ secrets.RS_HOST }}
-          MY_KEY: ${{ secrets.RS_KEY }}
-          MY_APP_NAME: ${{ secrets.APP_NAME }}
-        run: |
-          echo "Start Configuration Injection..."
-
-          POSSIBLE_CONFIGS=("src/config.rs" "libs/hbb_common/src/config.rs")
-          
-          for CONF_FILE in "${POSSIBLE_CONFIGS[@]}"; do
-            if [ -f "$CONF_FILE" ]; then
-               echo "Passe Server und Key an in: $CONF_FILE"
-               
-               sed -i "s|^.*pub const RENDEZVOUS_SERVER:.*$|pub const RENDEZVOUS_SERVER: \&'static str = \"$MY_HOST\";|g" "$CONF_FILE"
-               sed -i "s|^.*pub const RENDEZVOUS_SERVERS:.*$|pub const RENDEZVOUS_SERVERS: \&[\&str] = \&[\"$MY_HOST\"];|g" "$CONF_FILE"
-               sed -i "s|^.*pub const RS_PUB_KEY:.*$|pub const RS_PUB_KEY: \&'static str = \"$MY_KEY\";|g" "$CONF_FILE"
-            fi
-          done
-
-          echo "Passe App-Namen an..."
-          CPP_FILE=$(find flutter -name "main.cpp" | head -n 1)
-          if [ -f "$CPP_FILE" ]; then
-             sed -i "s|L\"RustDesk\"|L\"$MY_APP_NAME\"|g" "$CPP_FILE"
-          fi
-
-          PUBSPEC=$(find flutter -name "pubspec.yaml" | head -n 1)
-          if [ -f "$PUBSPEC" ]; then
-             sed -i "s|description: RustDesk|description: $MY_APP_NAME|g" "$PUBSPEC"
-          fi
-
-            # --- GENERATE BRIDGE ---
+      # --- 5. BRIDGE GENERIEREN ---
       - name: Generate Flutter Rust Bridge
         shell: bash
         run: |
-          echo "Installiere flutter_rust_bridge_codegen..."
           cargo install flutter_rust_bridge_codegen --version 1.80.1
-          
-          echo "Hole Flutter Abhängigkeiten (wird für ffigen benötigt)..."
           pushd flutter
           flutter pub get
           popd
-          
-          echo "Generiere Übersetzer-Dateien (Bridge) für Rust und Dart..."
           flutter_rust_bridge_codegen \
             --rust-input src/flutter_ffi.rs \
             --dart-output flutter/lib/generated_bridge.dart \
             --rust-output src/bridge_generated.rs \
             --c-output flutter/windows/runner/bridge_generated.h
-          
-          echo "Bridge erfolgreich generiert!"
 
-      
-      # --- BUILD PROZESS ---
+      # --- 6. KOMPILIEREN ---
       - name: Build RustDesk Application
         shell: powershell
         env:
           VCPKG_ROOT: C:\vcpkg
           VCPKG_DEFAULT_TRIPLET: x64-windows-static
         run: |
-          Write-Host "Start Build Script..."
           python build.py --portable --hwcodec --flutter --vram --skip-portable-pack
           
-          Write-Host "Build abgeschlossen. Prüfe Ergebnisse..."
           $sourceDir = "flutter\build\windows\x64\runner\Release"
-          
           if (Test-Path $sourceDir) {
-              Write-Host "Release Ordner gefunden! Verschiebe nach ./rustdesk..."
               Move-Item -Path $sourceDir -Destination "rustdesk" -Force
-              Write-Host "Dateien bereitgestellt in ./rustdesk/"
           } else {
-              Write-Error "FEHLER: Release Ordner nach dem Build nicht gefunden!"
+              Write-Error "FEHLER: Build Output nicht gefunden!"
               exit 1
           }
 
-      # --- PACKEN ---
+      # --- 7. PACKEN (PORTABLE EXE) ---
       - name: Pack Portable Executable
         shell: powershell
         run: |
-          Write-Host "Installiere Python Deps..."
           Push-Location ./libs/portable
           pip install -r requirements.txt
           
-          Write-Host "Starte Generator..."
           $exeFile = Get-ChildItem -Path "../../rustdesk" -Filter "*.exe" | Select-Object -First 1
+          if (-not $exeFile) { Write-Error "KEINE EXE GEFUNDEN"; exit 1 }
           
-          if (-not $exeFile) {
-             Write-Error "FEHLER: Keine EXE im staging Ordner!"
-             exit 1
-          }
-          
-          $exeName = $exeFile.Name
-          Write-Host "Packe: $exeName"
-          
-          python generate.py -f "../../rustdesk/" -o . -e "$exeName"
+          python generate.py -f "../../rustdesk/" -o . -e "$($exeFile.Name)"
           Pop-Location
           
           New-Item -ItemType Directory -Path "release_output" -Force | Out-Null
-          $packedExe = Get-ChildItem -Path . -Recurse -Filter "*packer.exe" | Select-Object -First 1
+          $packed = Get-ChildItem -Path . -Recurse -Filter "*packer.exe" | Select-Object -First 1
           
-          if ($packedExe) {
-              $newName = "./release_output/TechnikHilfe_Portable_${{ env.VERSION_TAG }}.exe"
-              Move-Item -Path $packedExe.FullName -Destination $newName -Force
-              Write-Host "Erfolg! Datei wurde erstellt: $newName"
+          if ($packed) {
+              # Hier benennen wir die Datei um
+              $finalName = "./release_output/${{ secrets.APP_NAME }}_Portable_${{ env.VERSION_TAG }}.exe"
+              Move-Item $packed.FullName $finalName -Force
           } else {
-              Write-Error "FEHLER: Gepackte Datei nicht gefunden."
+              Write-Error "Packen fehlgeschlagen."
               exit 1
           }
 
