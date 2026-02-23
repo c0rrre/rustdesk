@@ -17,6 +17,10 @@ jobs:
   build-portable:
     name: Build Windows Portable
     runs-on: windows-2022
+    env:
+      # Globale Variablen für LLVM/Clang (Wichtig für hwcodec!)
+      LIBCLANG_PATH: C:\Program Files\LLVM\bin
+      LLVM_INSTALL_PATH: C:\Program Files\LLVM
     
     steps:
       - name: Checkout Source Code
@@ -38,7 +42,6 @@ jobs:
         run: |
           echo "Wende Branding an..."
           
-          # App Name ändern
           if [ -n "$MY_APP_NAME" ]; then
              sed -i "s|description: RustDesk|description: $MY_APP_NAME|g" flutter/pubspec.yaml
              find flutter -name "main.cpp" -exec sed -i "s|L\"RustDesk\"|L\"$MY_APP_NAME\"|g" {} +
@@ -46,7 +49,6 @@ jobs:
              find flutter -name "Runner.rc" -exec sed -i "s|VALUE \"ProductName\", \"RustDesk\"|VALUE \"ProductName\", \"$MY_APP_NAME\"|g" {} +
           fi
 
-          # Logo Fix: Ordner erstellen und kopieren
           if [ -f "logo.png" ]; then
              echo "Kopiere logo.png..."
              mkdir -p flutter/assets/images
@@ -122,21 +124,17 @@ jobs:
             --rust-output src/bridge_generated.rs \
             --c-output flutter/windows/runner/bridge_generated.h
 
-      # --- 6. KOMPILIEREN (Fix: LLVM Pfade explizit gesetzt) ---
+      # --- 6. KOMPILIEREN (Ohne cargo update!) ---
       - name: Build RustDesk Application
         shell: powershell
         env:
           VCPKG_ROOT: C:\vcpkg
           VCPKG_DEFAULT_TRIPLET: x64-windows-static
-          # WICHTIG: Damit Rust die libclang.dll findet!
-          LIBCLANG_PATH: C:\Program Files\LLVM\bin
-          LLVM_INSTALL_PATH: C:\Program Files\LLVM
         run: |
-          Write-Host "Aktualisiere Rust Dependencies..."
-          cargo update
-          
           Write-Host "Start Build Script..."
-          # Wir fügen --release explizit hinzu, um sicherzugehen
+          
+          # Wir entfernen 'cargo update', da es Versionen kaputt machen kann.
+          # Wir vertrauen auf die Cargo.lock Datei.
           python build.py --portable --hwcodec --flutter --vram --skip-portable-pack
           
           $sourceDir = "flutter\build\windows\x64\runner\Release"
