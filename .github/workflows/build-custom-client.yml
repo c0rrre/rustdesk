@@ -23,9 +23,17 @@ jobs:
       - name: Setup Environment Variables
         shell: bash
         run: |
-          # Version Tag generieren
-          echo "VERSION_TAG=v$(date +'%Y.%m.%d-%H%M')" >> $GITHUB_ENV
+          # RustDesk Version automatisch aus Cargo.toml auslesen
+          RUSTDESK_VERSION=$(grep '^version' Cargo.toml | head -1 | sed -E 's/version *= *"(.*)"/\1/')
+
+          # VERSION_TAG = RustDesk Version + Datum + Uhrzeit
+          echo "VERSION_TAG=${RUSTDESK_VERSION}-$(date +'%Y.%m.%d-%H%M')" >> $GITHUB_ENV
+
+          # Flutter Version
           echo "FLUTTER_VERSION=3.24.5" >> $GITHUB_ENV
+
+          echo "RUSTDESK_VERSION = $RUSTDESK_VERSION"
+          echo "VERSION_TAG = ${VERSION_TAG}"
 
       - name: Install Build Tools (LLVM & NASM)
         shell: powershell
@@ -109,6 +117,7 @@ jobs:
       - name: Inject Server Configuration
         shell: bash
         env:
+          VAL_ID: ${{ secrets.ID_SERVER }}
           VAL_API: ${{ secrets.API_SERVER }}
           VAL_REND: ${{ secrets.RENDEZVOUS_SERVER }}
           VAL_KEY: ${{ secrets.RS_PUB_KEY }}
@@ -119,11 +128,12 @@ jobs:
           for CONF in "${TARGETS[@]}"; do
             if [ -f "$CONF" ]; then
               echo "Bearbeite: $CONF"
+              sed -i "s|^.*pub const ID_SERVER:.*$|pub const ID_SERVER: \&'static str = \"$VAL_ID\";|g" "$CONF"
               sed -i "s|^.*pub const API_SERVER:.*$|pub const API_SERVER: \&'static str = \"$VAL_API\";|g" "$CONF"
               sed -i "s|^.*pub const RENDEZVOUS_SERVER:.*$|pub const RENDEZVOUS_SERVER: \&'static str = \"$VAL_REND\";|g" "$CONF"
               sed -i "s|^.*pub const RENDEZVOUS_SERVERS:.*$|pub const RENDEZVOUS_SERVERS: \&[\&str] = \&[\"$VAL_REND\"];|g" "$CONF"
               sed -i "s|^.*pub const RS_PUB_KEY:.*$|pub const RS_PUB_KEY: \&'static str = \"$VAL_KEY\";|g" "$CONF"
-              echo "Konfiguration angewendet."
+              echo "Konfiguration angewendet in $CONF"
             fi
           done
 
