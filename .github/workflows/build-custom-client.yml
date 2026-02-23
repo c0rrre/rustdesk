@@ -2,12 +2,8 @@ name: RustDesk Custom Build
 
 on:
   push:
-    branches: [ "main", "master" ]
-    paths-ignore:
-      - '.github/**'
-      - 'README.md'
-      - 'LICENSE'
-      - 'docs/**'
+    tags:
+      - '*'
   workflow_dispatch:
 
 permissions:
