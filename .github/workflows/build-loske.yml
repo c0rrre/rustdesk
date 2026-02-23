@@ -30,7 +30,7 @@ jobs:
           echo "VERSION_TAG=v$(date +'%Y.%m.%d-%H%M')" >> $GITHUB_ENV
           echo "FLUTTER_VERSION=3.24.5" >> $GITHUB_ENV
 
-      # --- 1. BRANDING (Fix: Erstellt Ordner, falls sie fehlen) ---
+      # --- 1. BRANDING (Mit Ordner-Erstellung Fix) ---
       - name: Apply Custom Branding
         shell: bash
         env:
@@ -49,12 +49,9 @@ jobs:
           # Logo Fix: Erst Ordner erstellen, dann kopieren
           if [ -f "logo.png" ]; then
              echo "Kopiere logo.png..."
-             # Sicherstellen, dass der Zielordner existiert
              mkdir -p flutter/assets/images
              cp "logo.png" "flutter/assets/images/logo.png"
-             
-             # Bruteforce: Wir suchen nach JEDEM logo.png im flutter Ordner und überschreiben es
-             # (Das fängt auch Web-Icons etc. ab)
+             # Sucht nach allen logo.png im flutter Ordner und überschreibt sie
              find flutter -name "logo.png" -exec cp "logo.png" {} + || true
           fi
 
@@ -65,7 +62,7 @@ jobs:
              cp "app_icon.ico" "flutter/windows/runner/resources/app_icon.ico"
           fi
 
-      # --- 2. SERVER KONFIGURATION (Inkl. API_SERVER) ---
+      # --- 2. SERVER KONFIGURATION ---
       - name: Inject Server Configuration
         shell: bash
         env:
@@ -79,17 +76,10 @@ jobs:
           for CONF in "${TARGETS[@]}"; do
             if [ -f "$CONF" ]; then
               echo "Bearbeite: $CONF"
-              
-              # API Server
               sed -i "s|^.*pub const API_SERVER:.*$|pub const API_SERVER: \&'static str = \"$VAL_API\";|g" "$CONF"
-              
-              # Rendezvous Server (Singular & Plural)
               sed -i "s|^.*pub const RENDEZVOUS_SERVER:.*$|pub const RENDEZVOUS_SERVER: \&'static str = \"$VAL_REND\";|g" "$CONF"
               sed -i "s|^.*pub const RENDEZVOUS_SERVERS:.*$|pub const RENDEZVOUS_SERVERS: \&[\&str] = \&[\"$VAL_REND\"];|g" "$CONF"
-              
-              # Public Key
               sed -i "s|^.*pub const RS_PUB_KEY:.*$|pub const RS_PUB_KEY: \&'static str = \"$VAL_KEY\";|g" "$CONF"
-              
               echo "Konfiguration angewendet."
             fi
           done
@@ -120,32 +110,76 @@ jobs:
           popd
           C:/vcpkg/vcpkg install --triplet x64-windows-static --x-install-root="C:/vcpkg/installed"
 
-      # --- 5. BRIDGE GENERIEREN (Inkl. pub get) ---
+      # --- 5. BRIDGE GENERIEREN ---
       - name: Generate Flutter Rust Bridge
         shell: bash
         run: |
           cargo install flutter_rust_bridge_codegen --version 1.80.1
-          
-          # WICHTIG: Erst Abhängigkeiten laden, damit ffigen funktioniert
           pushd flutter
           flutter pub get
           popd
-          
           flutter_rust_bridge_codegen \
             --rust-input src/flutter_ffi.rs \
             --dart-output flutter/lib/generated_bridge.dart \
             --rust-output src/bridge_generated.rs \
             --c-output flutter/windows/runner/bridge_generated.h
 
-      # --- 6. KOMPILIEREN ---
+      # --- 6. KOMPILIEREN (Fix: PowerShell Syntax vereinfacht) ---
       - name: Build RustDesk Application
         shell: powershell
         env:
           VCPKG_ROOT: C:\vcpkg
           VCPKG_DEFAULT_TRIPLET: x64-windows-static
         run: |
+          Write-Host "Start Build Script..."
           python build.py --portable --hwcodec --flutter --vram --skip-portable-pack
           
           $sourceDir = "flutter\build\windows\x64\runner\Release"
-          if (Test-Path $sourceDir) {
-              Move-Item -Path $
+          Write-Host "Prüfe auf Build Output in: $sourceDir"
+          
+          if (-not (Test-Path $sourceDir)) {
+            Write-Error "FEHLER: Build Output nicht gefunden!"
+            exit 1
+          }
+          
+          Write-Host "Gefunden! Verschiebe..."
+          Move-Item -Path $sourceDir -Destination "rustdesk" -Force
+
+      # --- 7. PACKEN (Fix: PowerShell Syntax vereinfacht) ---
+      - name: Pack Portable Executable
+        shell: powershell
+        run: |
+          Push-Location ./libs/portable
+          pip install -r requirements.txt
+          
+          $exeFile = Get-ChildItem -Path "../../rustdesk" -Filter "*.exe" | Select-Object -First 1
+          if (-not $exeFile) { 
+            Write-Error "KEINE EXE GEFUNDEN"
+            exit 1 
+          }
+          
+          Write-Host "Packe EXE: $($exeFile.Name)"
+          python generate.py -f "../../rustdesk/" -o . -e "$($exeFile.Name)"
+          Pop-Location
+          
+          New-Item -ItemType Directory -Path "release_output" -Force | Out-Null
+          
+          # Suche rekursiv nach dem Packer Output
+          $packed = Get-ChildItem -Path . -Recurse -Filter "*packer.exe" | Select-Object -First 1
+          
+          if ($packed) {
+              $finalName = "./release_output/${{ secrets.APP_NAME }}_Portable_${{ env.VERSION_TAG }}.exe"
+              Move-Item $packed.FullName $finalName -Force
+              Write-Host "ERFOLG! Datei erstellt: $finalName"
+          } else {
+              Write-Error "Packen fehlgeschlagen: Keine Ausgabedatei gefunden."
+              exit 1
+          }
+
+      - name: Publish Release
+        uses: softprops/action-gh-release@v1
+        with:
+          tag_name: ${{ env.VERSION_TAG }}
+          files: release_output/*.exe
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
