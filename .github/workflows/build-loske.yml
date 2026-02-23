@@ -30,7 +30,7 @@ jobs:
           echo "VERSION_TAG=v$(date +'%Y.%m.%d-%H%M')" >> $GITHUB_ENV
           echo "FLUTTER_VERSION=3.24.5" >> $GITHUB_ENV
 
-      # --- 1. BRANDING (Mit Ordner-Erstellung Fix) ---
+      # --- 1. BRANDING ---
       - name: Apply Custom Branding
         shell: bash
         env:
@@ -46,16 +46,14 @@ jobs:
              find flutter -name "Runner.rc" -exec sed -i "s|VALUE \"ProductName\", \"RustDesk\"|VALUE \"ProductName\", \"$MY_APP_NAME\"|g" {} +
           fi
 
-          # Logo Fix: Erst Ordner erstellen, dann kopieren
+          # Logo Fix: Ordner erstellen und kopieren
           if [ -f "logo.png" ]; then
              echo "Kopiere logo.png..."
              mkdir -p flutter/assets/images
              cp "logo.png" "flutter/assets/images/logo.png"
-             # Sucht nach allen logo.png im flutter Ordner und überschreibt sie
              find flutter -name "logo.png" -exec cp "logo.png" {} + || true
           fi
 
-          # Icon Fix
           if [ -f "app_icon.ico" ]; then
              echo "Kopiere app_icon.ico..."
              mkdir -p flutter/windows/runner/resources
@@ -124,28 +122,35 @@ jobs:
             --rust-output src/bridge_generated.rs \
             --c-output flutter/windows/runner/bridge_generated.h
 
-      # --- 6. KOMPILIEREN (Fix: PowerShell Syntax vereinfacht) ---
+      # --- 6. KOMPILIEREN (Fix: LLVM Pfade explizit gesetzt) ---
       - name: Build RustDesk Application
         shell: powershell
         env:
           VCPKG_ROOT: C:\vcpkg
           VCPKG_DEFAULT_TRIPLET: x64-windows-static
+          # WICHTIG: Damit Rust die libclang.dll findet!
+          LIBCLANG_PATH: C:\Program Files\LLVM\bin
+          LLVM_INSTALL_PATH: C:\Program Files\LLVM
         run: |
+          Write-Host "Aktualisiere Rust Dependencies..."
+          cargo update
+          
           Write-Host "Start Build Script..."
+          # Wir fügen --release explizit hinzu, um sicherzugehen
           python build.py --portable --hwcodec --flutter --vram --skip-portable-pack
           
           $sourceDir = "flutter\build\windows\x64\runner\Release"
           Write-Host "Prüfe auf Build Output in: $sourceDir"
           
           if (-not (Test-Path $sourceDir)) {
-            Write-Error "FEHLER: Build Output nicht gefunden!"
+            Write-Error "FEHLER: Build Output nicht gefunden! (Compiler abgestürzt)"
             exit 1
           }
           
           Write-Host "Gefunden! Verschiebe..."
           Move-Item -Path $sourceDir -Destination "rustdesk" -Force
 
-      # --- 7. PACKEN (Fix: PowerShell Syntax vereinfacht) ---
+      # --- 7. PACKEN ---
       - name: Pack Portable Executable
         shell: powershell
         run: |
@@ -164,7 +169,6 @@ jobs:
           
           New-Item -ItemType Directory -Path "release_output" -Force | Out-Null
           
-          # Suche rekursiv nach dem Packer Output
           $packed = Get-ChildItem -Path . -Recurse -Filter "*packer.exe" | Select-Object -First 1
           
           if ($packed) {
@@ -172,7 +176,7 @@ jobs:
               Move-Item $packed.FullName $finalName -Force
               Write-Host "ERFOLG! Datei erstellt: $finalName"
           } else {
-              Write-Error "Packen fehlgeschlagen: Keine Ausgabedatei gefunden."
+              Write-Error "Packen fehlgeschlagen."
               exit 1
           }
 
