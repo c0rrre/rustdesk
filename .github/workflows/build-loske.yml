@@ -30,7 +30,7 @@ jobs:
           echo "VERSION_TAG=v$(date +'%Y.%m.%d-%H%M')" >> $GITHUB_ENV
           echo "FLUTTER_VERSION=3.24.5" >> $GITHUB_ENV
 
-      # --- 1. BRANDING ANWENDEN (Logo & Name) ---
+      # --- 1. BRANDING (Fix: Erstellt Ordner, falls sie fehlen) ---
       - name: Apply Custom Branding
         shell: bash
         env:
@@ -38,7 +38,7 @@ jobs:
         run: |
           echo "Wende Branding an..."
           
-          # App Name in diversen Dateien ändern
+          # App Name ändern
           if [ -n "$MY_APP_NAME" ]; then
              sed -i "s|description: RustDesk|description: $MY_APP_NAME|g" flutter/pubspec.yaml
              find flutter -name "main.cpp" -exec sed -i "s|L\"RustDesk\"|L\"$MY_APP_NAME\"|g" {} +
@@ -46,45 +46,55 @@ jobs:
              find flutter -name "Runner.rc" -exec sed -i "s|VALUE \"ProductName\", \"RustDesk\"|VALUE \"ProductName\", \"$MY_APP_NAME\"|g" {} +
           fi
 
-          # Logos kopieren (wenn vorhanden)
-          if [ -f "app_icon.ico" ]; then cp "app_icon.ico" "flutter/windows/runner/resources/app_icon.ico"; fi
-          if [ -f "logo.png" ]; then cp "logo.png" "flutter/assets/images/logo.png"; fi
+          # Logo Fix: Erst Ordner erstellen, dann kopieren
+          if [ -f "logo.png" ]; then
+             echo "Kopiere logo.png..."
+             # Sicherstellen, dass der Zielordner existiert
+             mkdir -p flutter/assets/images
+             cp "logo.png" "flutter/assets/images/logo.png"
+             
+             # Bruteforce: Wir suchen nach JEDEM logo.png im flutter Ordner und überschreiben es
+             # (Das fängt auch Web-Icons etc. ab)
+             find flutter -name "logo.png" -exec cp "logo.png" {} + || true
+          fi
 
-      # --- 2. SERVER KONFIGURATION INJEZIEREN ---
+          # Icon Fix
+          if [ -f "app_icon.ico" ]; then
+             echo "Kopiere app_icon.ico..."
+             mkdir -p flutter/windows/runner/resources
+             cp "app_icon.ico" "flutter/windows/runner/resources/app_icon.ico"
+          fi
+
+      # --- 2. SERVER KONFIGURATION (Inkl. API_SERVER) ---
       - name: Inject Server Configuration
         shell: bash
         env:
-          # Hier holen wir deine 3 Variablen aus den Secrets
           VAL_API: ${{ secrets.API_SERVER }}
           VAL_REND: ${{ secrets.RENDEZVOUS_SERVER }}
           VAL_KEY: ${{ secrets.RS_PUB_KEY }}
         run: |
           echo "Suche Konfigurationsdateien..."
-          
-          # Wir suchen an beiden möglichen Orten nach der Config
           TARGETS=("src/config.rs" "libs/hbb_common/src/config.rs")
           
           for CONF in "${TARGETS[@]}"; do
             if [ -f "$CONF" ]; then
               echo "Bearbeite: $CONF"
               
-              # 1. API SERVER (Wichtig für Pro/Web Funktionen)
+              # API Server
               sed -i "s|^.*pub const API_SERVER:.*$|pub const API_SERVER: \&'static str = \"$VAL_API\";|g" "$CONF"
               
-              # 2. RENDEZVOUS SERVER (Der eigentliche Verbindungsserver)
+              # Rendezvous Server (Singular & Plural)
               sed -i "s|^.*pub const RENDEZVOUS_SERVER:.*$|pub const RENDEZVOUS_SERVER: \&'static str = \"$VAL_REND\";|g" "$CONF"
-              
-              # 3. RENDEZVOUS SERVERS (Plural - muss auch gesetzt werden!)
               sed -i "s|^.*pub const RENDEZVOUS_SERVERS:.*$|pub const RENDEZVOUS_SERVERS: \&[\&str] = \&[\"$VAL_REND\"];|g" "$CONF"
               
-              # 4. PUBLIC KEY (Verschlüsselung)
+              # Public Key
               sed -i "s|^.*pub const RS_PUB_KEY:.*$|pub const RS_PUB_KEY: \&'static str = \"$VAL_KEY\";|g" "$CONF"
               
-              echo "Konfiguration erfolgreich angewendet."
+              echo "Konfiguration angewendet."
             fi
           done
 
-      # --- 3. BUILD TOOLS INSTALLIEREN ---
+      # --- 3. BUILD TOOLS ---
       - name: Install Build Tools (LLVM & NASM)
         shell: powershell
         run: choco install llvm nasm -y
@@ -98,7 +108,7 @@ jobs:
           flutter-version: '3.24.5'
           channel: 'stable'
 
-      # --- 4. ABHÄNGIGKEITEN (VCPKG CLEAN BUILD) ---
+      # --- 4. ABHÄNGIGKEITEN (VCPKG CLEAN) ---
       - name: Install vcpkg Dependencies
         shell: bash
         run: |
@@ -108,17 +118,19 @@ jobs:
           git reset --hard 120deac3062162151622ca4860575a33844ba10b
           ./bootstrap-vcpkg.bat
           popd
-          # Installiert FFmpeg, HWCodec, etc.
           C:/vcpkg/vcpkg install --triplet x64-windows-static --x-install-root="C:/vcpkg/installed"
 
-      # --- 5. BRIDGE GENERIEREN ---
+      # --- 5. BRIDGE GENERIEREN (Inkl. pub get) ---
       - name: Generate Flutter Rust Bridge
         shell: bash
         run: |
           cargo install flutter_rust_bridge_codegen --version 1.80.1
+          
+          # WICHTIG: Erst Abhängigkeiten laden, damit ffigen funktioniert
           pushd flutter
           flutter pub get
           popd
+          
           flutter_rust_bridge_codegen \
             --rust-input src/flutter_ffi.rs \
             --dart-output flutter/lib/generated_bridge.dart \
@@ -136,41 +148,4 @@ jobs:
           
           $sourceDir = "flutter\build\windows\x64\runner\Release"
           if (Test-Path $sourceDir) {
-              Move-Item -Path $sourceDir -Destination "rustdesk" -Force
-          } else {
-              Write-Error "FEHLER: Build Output nicht gefunden!"
-              exit 1
-          }
-
-      # --- 7. PACKEN (PORTABLE EXE) ---
-      - name: Pack Portable Executable
-        shell: powershell
-        run: |
-          Push-Location ./libs/portable
-          pip install -r requirements.txt
-          
-          $exeFile = Get-ChildItem -Path "../../rustdesk" -Filter "*.exe" | Select-Object -First 1
-          if (-not $exeFile) { Write-Error "KEINE EXE GEFUNDEN"; exit 1 }
-          
-          python generate.py -f "../../rustdesk/" -o . -e "$($exeFile.Name)"
-          Pop-Location
-          
-          New-Item -ItemType Directory -Path "release_output" -Force | Out-Null
-          $packed = Get-ChildItem -Path . -Recurse -Filter "*packer.exe" | Select-Object -First 1
-          
-          if ($packed) {
-              # Hier benennen wir die Datei um
-              $finalName = "./release_output/${{ secrets.APP_NAME }}_Portable_${{ env.VERSION_TAG }}.exe"
-              Move-Item $packed.FullName $finalName -Force
-          } else {
-              Write-Error "Packen fehlgeschlagen."
-              exit 1
-          }
-
-      - name: Publish Release
-        uses: softprops/action-gh-release@v1
-        with:
-          tag_name: ${{ env.VERSION_TAG }}
-          files: release_output/*.exe
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+              Move-Item -Path $
