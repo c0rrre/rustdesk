@@ -52,14 +52,14 @@ jobs:
           if [ -f "logo.png" ]; then
              echo "Kopiere logo.png..."
              mkdir -p flutter/assets/images
-             cp "logo.png" "flutter/assets/images/logo.png"
+             cp "BRANDING/logo.png" "flutter/assets/images/logo.png"
              find flutter -name "logo.png" -exec cp "logo.png" {} + || true
           fi
 
           if [ -f "app_icon.ico" ]; then
              echo "Kopiere app_icon.ico..."
              mkdir -p flutter/windows/runner/resources
-             cp "app_icon.ico" "flutter/windows/runner/resources/app_icon.ico"
+             cp "BRANDING/app_icon.ico" "flutter/windows/runner/resources/app_icon.ico"
           fi
 
       # --- 2. SERVER KONFIGURATION ---
