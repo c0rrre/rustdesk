@@ -1,30 +1,37 @@
 name: Sync Upstream Tags (Releases)
 
-permissions:
-  contents: write
-  workflows: write
-
 on:
   schedule:
     - cron: '0 */6 * * *'
   workflow_dispatch:
 
+permissions:
+  contents: write
+
 jobs:
   sync-tags:
     runs-on: ubuntu-latest
+
     steps:
-      - name: Checkout
+      - name: Checkout repository
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
 
-      - name: Fetch and Push Upstream Tags
+      - name: Configure Git
         run: |
-          git config --global user.email "action@github.com"
           git config --global user.name "GitHub Action"
+          git config --global user.email "action@github.com"
 
+      - name: Add upstream
+        run: |
+          git remote remove upstream 2>/dev/null || true
           git remote add upstream https://github.com/rustdesk/rustdesk.git
 
+      - name: Fetch upstream tags
+        run: |
           git fetch upstream --tags
 
-          git push origin --tags
+      - name: Push tags to origin
+        run: |
+          git push origin refs/tags/*:refs/tags/*
