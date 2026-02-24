@@ -1,0 +1,35 @@
+name: Sync Upstream Tags (Releases)
+
+on:
+  schedule:
+    - cron: '0 */6 * * *'
+  workflow_dispatch:
+
+jobs:
+  sync-tags:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          token: ${{ secrets.SYNC_TOKEN }}
+
+      - name: Configure Git
+        run: |
+          git config --global user.name "Tag Sync Bot"
+          git config --global user.email "bot@users.noreply.github.com"
+
+      - name: Add upstream
+        run: |
+          git remote remove upstream 2>/dev/null || true
+          git remote add upstream https://github.com/rustdesk/rustdesk.git
+
+      - name: Fetch tags
+        run: |
+          git fetch upstream --tags
+
+      - name: Push tags
+        run: |
+          git push origin refs/tags/*:refs/tags/*

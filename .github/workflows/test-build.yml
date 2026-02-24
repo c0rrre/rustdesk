@@ -1,0 +1,167 @@
+name: Test Build (PR Check)
+
+# Startet nur, wenn ein Pull Request gegen Master/Main geöffnet wird
+on:
+  pull_request:
+    branches: [ "master", "main" ]
+  workflow_dispatch:
+
+permissions:
+  contents: read # Für PRs reicht read, wir pushen ja kein Release
+
+jobs:
+  build-test:
+    name: Test Build Windows
+    runs-on: windows-2025
+    env:
+      # WICHTIG: Deine globalen Fixes für den Compiler
+      LIBCLANG_PATH: C:\Program Files\LLVM\bin
+      LLVM_INSTALL_PATH: C:\Program Files\LLVM
+    
+    steps:
+      - name: Checkout Source Code
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Setup Environment Variables
+        shell: bash
+        run: |
+          # Wir nutzen einen fixen Namen für den Test
+          TIMESTAMP=$(date +'%Y%m%d-%H%M')
+          echo "VERSION_TAG=v-test-$TIMESTAMP" >> $GITHUB_ENV
+          echo "FLUTTER_VERSION=3.24.5" >> $GITHUB_ENV
+
+      # --- 1. BRANDING (Identisch zu deinem Haupt-Workflow) ---
+      - name: Apply Custom Branding
+        shell: bash
+        env:
+          MY_APP_NAME: ${{ secrets.APP_NAME }}
+        run: |
+          echo "Wende Branding an..."
+          if [ -n "$MY_APP_NAME" ]; then
+             sed -i "s|description: RustDesk|description: $MY_APP_NAME|g" flutter/pubspec.yaml
+             find flutter -name "main.cpp" -exec sed -i "s|L\"RustDesk\"|L\"$MY_APP_NAME\"|g" {} +
+             find flutter -name "Runner.rc" -exec sed -i "s|VALUE \"FileDescription\", \"RustDesk\"|VALUE \"FileDescription\", \"$MY_APP_NAME\"|g" {} +
+             find flutter -name "Runner.rc" -exec sed -i "s|VALUE \"ProductName\", \"RustDesk\"|VALUE \"ProductName\", \"$MY_APP_NAME\"|g" {} +
+          fi
+
+          if [ -f "logo.png" ]; then
+             mkdir -p flutter/assets/images
+             cp "logo.png" "flutter/assets/images/logo.png"
+             find flutter -name "logo.png" -exec cp "logo.png" {} + || true
+          fi
+
+          if [ -f "app_icon.ico" ]; then
+             mkdir -p flutter/windows/runner/resources
+             cp "app_icon.ico" "flutter/windows/runner/resources/app_icon.ico"
+          fi
+
+      # --- 2. SERVER KONFIGURATION (Identisch) ---
+      - name: Inject Server Configuration
+        shell: bash
+        env:
+          VAL_API: ${{ secrets.API_SERVER }}
+          VAL_REND: ${{ secrets.RENDEZVOUS_SERVER }}
+          VAL_KEY: ${{ secrets.RS_PUB_KEY }}
+        run: |
+          echo "Suche Konfigurationsdateien..."
+          TARGETS=("src/config.rs" "libs/hbb_common/src/config.rs")
+          for CONF in "${TARGETS[@]}"; do
+            if [ -f "$CONF" ]; then
+              sed -i "s|^.*pub const API_SERVER:.*$|pub const API_SERVER: \&'static str = \"$VAL_API\";|g" "$CONF"
+              sed -i "s|^.*pub const RENDEZVOUS_SERVER:.*$|pub const RENDEZVOUS_SERVER: \&'static str = \"$VAL_REND\";|g" "$CONF"
+              sed -i "s|^.*pub const RENDEZVOUS_SERVERS:.*$|pub const RENDEZVOUS_SERVERS: \&[\&str] = \&[\"$VAL_REND\"];|g" "$CONF"
+              sed -i "s|^.*pub const RS_PUB_KEY:.*$|pub const RS_PUB_KEY: \&'static str = \"$VAL_KEY\";|g" "$CONF"
+            fi
+          done
+
+      # --- 3. BUILD TOOLS ---
+      - name: Install Build Tools (LLVM & NASM)
+        shell: powershell
+        run: choco install llvm nasm -y
+
+      - name: Setup Rust Toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Setup Flutter
+        uses: subosito/flutter-action@v2
+        with:
+          flutter-version: '3.24.5'
+          channel: 'stable'
+
+      # --- 4. ABHÄNGIGKEITEN (VCPKG CLEAN) ---
+      - name: Install vcpkg Dependencies
+        shell: bash
+        run: |
+          rm -rf C:/vcpkg
+          git clone https://github.com/microsoft/vcpkg C:/vcpkg
+          pushd C:/vcpkg
+          git reset --hard 120deac3062162151622ca4860575a33844ba10b
+          ./bootstrap-vcpkg.bat
+          popd
+          C:/vcpkg/vcpkg install --triplet x64-windows-static --x-install-root="C:/vcpkg/installed"
+
+      # --- 5. BRIDGE GENERIEREN ---
+      - name: Generate Flutter Rust Bridge
+        shell: bash
+        run: |
+          cargo install flutter_rust_bridge_codegen --version 1.80.1
+          pushd flutter
+          flutter pub get
+          popd
+          flutter_rust_bridge_codegen \
+            --rust-input src/flutter_ffi.rs \
+            --dart-output flutter/lib/generated_bridge.dart \
+            --rust-output src/bridge_generated.rs \
+            --c-output flutter/windows/runner/bridge_generated.h
+
+      # --- 6. KOMPILIEREN ---
+      - name: Build RustDesk Application
+        shell: powershell
+        env:
+          VCPKG_ROOT: C:\vcpkg
+          VCPKG_DEFAULT_TRIPLET: x64-windows-static
+        run: |
+          Write-Host "Start Build Script..."
+          python build.py --portable --hwcodec --flutter --vram --skip-portable-pack
+          
+          $sourceDir = "flutter\build\windows\x64\runner\Release"
+          if (-not (Test-Path $sourceDir)) {
+            Write-Error "FEHLER: Build Output nicht gefunden!"
+            exit 1
+          }
+          Move-Item -Path $sourceDir -Destination "rustdesk" -Force
+
+      # --- 7. PACKEN ---
+      - name: Pack Portable Executable
+        shell: powershell
+        run: |
+          Push-Location ./libs/portable
+          pip install -r requirements.txt
+          
+          $exeFile = Get-ChildItem -Path "../../rustdesk" -Filter "*.exe" | Select-Object -First 1
+          if (-not $exeFile) { Write-Error "KEINE EXE"; exit 1 }
+          
+          python generate.py -f "../../rustdesk/" -o . -e "$($exeFile.Name)"
+          Pop-Location
+          
+          New-Item -ItemType Directory -Path "release_output" -Force | Out-Null
+          $packed = Get-ChildItem -Path . -Recurse -Filter "*packer.exe" | Select-Object -First 1
+          
+          if ($packed) {
+              $finalName = "./release_output/TEST_BUILD_${{ env.VERSION_TAG }}.exe"
+              Move-Item $packed.FullName $finalName -Force
+              Write-Host "Test-Datei erstellt: $finalName"
+          } else {
+              Write-Error "Packen fehlgeschlagen."
+              exit 1
+          }
+
+      # --- 8. ARTIFACT UPLOAD (Statt Release) ---
+      - name: Upload Test Build
+        uses: actions/upload-artifact@v4
+        with:
+          name: Test-Portable-Exe
+          path: release_output/*.exe
+          retention-days: 5
