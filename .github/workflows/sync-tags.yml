@@ -2,6 +2,7 @@ name: Sync Upstream Tags (Releases)
 
 permissions:
   contents: write
+  workflows: write
 
 on:
   schedule:
@@ -15,19 +16,15 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
         with:
-          fetch-depth: 0 
-          token: ${{ secrets.GITHUB_TOKEN }}
+          fetch-depth: 0
 
       - name: Fetch and Push Upstream Tags
         run: |
-          # Upstream konfigurieren
           git config --global user.email "action@github.com"
           git config --global user.name "GitHub Action"
+
           git remote add upstream https://github.com/rustdesk/rustdesk.git
-          
-          # Tags holen
+
           git fetch upstream --tags
-          
-          # Tags zu deinem Fork pushen (nur neue)
-          # --force ist hier meist nicht nötig, aber Tags überschreiben wir lieber nicht
+
           git push origin --tags
